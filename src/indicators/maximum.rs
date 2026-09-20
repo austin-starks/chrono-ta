@@ -18,6 +18,12 @@ const KEEP_RECENT: usize = 100;
 pub struct Maximum {
     duration: Duration,
     window: VecDeque<(DateTime<Utc>, f64)>,
+    /// Nanosecond timestamps mirroring `window`. Keeping them beside the
+    /// authoritative serialized `DateTime`s avoids converting the oldest
+    /// point on every observation merely to discover that nothing expired.
+    /// Transient so the serialized indicator contract remains unchanged.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    window_nanos: VecDeque<i64>,
     detector: AdaptiveTimeDetector,
     /// Cached `chrono::Duration` form of `duration` (computed once on first use)
     /// so `next()` skips a `from_std` conversion every call. Not serialized;
@@ -32,7 +38,7 @@ pub struct Maximum {
     /// points) and defensively after a deserialize. Never a persisted contract
     /// (skipped in serde; the outer config re-derives ta state via warmup).
     #[cfg_attr(feature = "serde", serde(skip))]
-    mono: VecDeque<(DateTime<Utc>, f64)>,
+    mono: VecDeque<(i64, f64)>,
 }
 
 impl Maximum {
@@ -48,6 +54,7 @@ impl Maximum {
             Ok(Self {
                 duration,
                 window: VecDeque::new(),
+                window_nanos: VecDeque::new(),
                 detector: AdaptiveTimeDetector::new(duration),
                 cached_window: None,
                 mono: VecDeque::new(),
@@ -69,35 +76,42 @@ impl Maximum {
     /// (newest) one, i.e. `window[..len-1]` — in O(n). Called after a thin
     /// (which drops arbitrary interior points) and defensively after a
     /// deserialize, where `mono` deserializes empty while `window` is populated.
-    fn rebuild_mono(&mut self) {
+    fn rebuild_transients(&mut self) {
+        self.window_nanos.clear();
         self.mono.clear();
         let sealed_len = self.window.len().saturating_sub(1);
-        for &entry in self.window.iter().take(sealed_len) {
-            while self.mono.back().map_or(false, |&(_, bv)| bv <= entry.1) {
+        for (index, &(timestamp, value)) in self.window.iter().enumerate() {
+            let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(i64::MIN);
+            self.window_nanos.push_back(timestamp_nanos);
+            if index >= sealed_len {
+                continue;
+            }
+            while self.mono.back().map_or(false, |&(_, bv)| bv <= value) {
                 self.mono.pop_back();
             }
-            self.mono.push_back(entry);
+            self.mono.push_back((timestamp_nanos, value));
         }
     }
 
-    fn remove_old_data(&mut self, current_time: DateTime<Utc>) {
+    fn remove_old_data(&mut self, current_nanos: i64) {
         let dur_nanos = *self
             .cached_window
             .get_or_insert_with(|| self.duration.as_nanos() as i64);
-        let cutoff_nanos = current_time.timestamp_nanos_opt().unwrap_or(i64::MIN) - dur_nanos;
+        let cutoff_nanos = current_nanos - dur_nanos;
         while self
-            .window
+            .window_nanos
             .front()
-            .map_or(false, |(time, _)| time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos)
+            .is_some_and(|&timestamp_nanos| timestamp_nanos <= cutoff_nanos)
         {
             self.window.pop_front();
+            self.window_nanos.pop_front();
         }
         // Evict the same expired points from the candidate deque (identical
         // predicate); `mono` is time-ordered front-oldest so this is O(evicted).
         while self
             .mono
             .front()
-            .map_or(false, |(time, _)| time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos)
+            .is_some_and(|&(timestamp_nanos, _)| timestamp_nanos <= cutoff_nanos)
         {
             self.mono.pop_front();
         }
@@ -153,8 +167,10 @@ impl Next<f64> for Maximum {
         // populated from a snapshot, mono defaulted empty). Invariant otherwise:
         // mono is non-empty iff window has >= 2 points, so this fires only
         // post-deserialize.
-        if self.mono.is_empty() && self.window.len() > 1 {
-            self.rebuild_mono();
+        if self.window_nanos.len() != self.window.len()
+            || (self.mono.is_empty() && self.window.len() > 1)
+        {
+            self.rebuild_transients();
         }
 
         // Check if we should replace the last value (same time bucket)
@@ -162,7 +178,8 @@ impl Next<f64> for Maximum {
 
         // ALWAYS remove old data first, regardless of replace/add (evicts
         // expired points from both the window and the sealed-candidate deque).
-        self.remove_old_data(timestamp);
+        let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(i64::MIN);
+        self.remove_old_data(timestamp_nanos);
 
         if should_replace {
             // Same bucket: drop the current (newest) point. It is `window.back()`
@@ -171,28 +188,36 @@ impl Next<f64> for Maximum {
             // candidate-deque surgery to do. This is the O(1) intraday hot path.
             if !self.window.is_empty() {
                 self.window.pop_back();
+                self.window_nanos.pop_back();
             }
-        } else if let Some(&sealed) = self.window.back() {
+        } else if let (Some(&(_, sealed_value)), Some(&sealed_nanos)) =
+            (self.window.back(), self.window_nanos.back())
+        {
             // New bucket: the point that was current becomes permanent. Seal it
             // into the monotonic deque now, dropping dominated tail candidates
             // (any tail value <= it can never again be the max while it is
             // in-window, since it is newer).
-            while self.mono.back().map_or(false, |&(_, bv)| bv <= sealed.1) {
+            while self
+                .mono
+                .back()
+                .map_or(false, |&(_, bv)| bv <= sealed_value)
+            {
                 self.mono.pop_back();
             }
-            self.mono.push_back(sealed);
+            self.mono.push_back((sealed_nanos, sealed_value));
         }
 
         // The new point becomes the current (newest) point. It stays OUT of
         // `mono` until a later new-bucket tick seals it.
         self.window.push_back((timestamp, value));
+        self.window_nanos.push_back(timestamp_nanos);
 
         // Thin window if it exceeds max size (sparse sampling for memory
         // efficiency). Thinning drops interior points, so rebuild mono to match.
         let len_before = self.window.len();
         self.thin_window();
         if self.window.len() != len_before {
-            self.rebuild_mono();
+            self.rebuild_transients();
         }
 
         // O(1) max = max(best sealed candidate, current point). In debug builds,
@@ -218,6 +243,7 @@ impl NextBatch<f64> for Maximum {}
 impl Reset for Maximum {
     fn reset(&mut self) {
         self.window.clear();
+        self.window_nanos.clear();
         self.mono.clear();
         self.detector.reset();
     }
@@ -370,5 +396,46 @@ mod tests {
             assert!(got.is_finite());
             assert!(got <= true_running_max, "thinned max exceeded true max");
         }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn transient_timestamp_cache_preserves_serialized_contract_and_resume() {
+        #[derive(serde::Serialize)]
+        struct LegacyMaximum<'a> {
+            duration: &'a Duration,
+            window: &'a VecDeque<(DateTime<Utc>, f64)>,
+            detector: &'a AdaptiveTimeDetector,
+        }
+
+        let duration = Duration::from_secs(7 * 86_400);
+        let start = Utc.with_ymd_and_hms(2024, 1, 2, 9, 30, 0).unwrap();
+        let mut uninterrupted = Maximum::new(duration).unwrap();
+        for (offset, value) in [(0, 100.0), (30, 105.0), (390, 101.0), (1_440, 99.0)] {
+            uninterrupted.next((start + chrono::Duration::minutes(offset), value));
+        }
+
+        let legacy_bytes = bincode::serialize(&LegacyMaximum {
+            duration: &uninterrupted.duration,
+            window: &uninterrupted.window,
+            detector: &uninterrupted.detector,
+        })
+        .unwrap();
+        assert_eq!(
+            bincode::serialize(&uninterrupted).unwrap(),
+            legacy_bytes,
+            "transient caches must not change persisted bytes"
+        );
+
+        let mut resumed: Maximum = bincode::deserialize(&legacy_bytes).unwrap();
+        assert!(resumed.window_nanos.is_empty());
+        assert!(resumed.mono.is_empty());
+        let next = (start + chrono::Duration::minutes(1_500), 110.0);
+        assert_eq!(resumed.next(next), uninterrupted.next(next));
+        assert_eq!(resumed.get_window(), uninterrupted.get_window());
+        assert_eq!(
+            bincode::serialize(&resumed).unwrap(),
+            bincode::serialize(&uninterrupted).unwrap()
+        );
     }
 }
