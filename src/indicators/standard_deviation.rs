@@ -55,24 +55,13 @@ impl StandardDeviation {
             .cached_window
             .get_or_insert_with(|| self.duration.as_nanos() as i64);
         let cutoff_nanos = current_time.timestamp_nanos_opt().unwrap_or(i64::MIN) - dur_nanos;
-        while self
-            .window
-            .front()
-            .map_or(false, |(time, _)| time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos)
-        {
+        while self.window.front().map_or(false, |(time, _)| {
+            time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos
+        }) {
             if let Some((_, old_value)) = self.window.pop_front() {
                 self.sum -= old_value;
                 self.sum_sq -= old_value * old_value;
             }
-        }
-    }
-
-    // Calculate the mean based on the current window
-    pub(super) fn mean(&self) -> f64 {
-        if !self.window.is_empty() {
-            self.sum / self.window.len() as f64
-        } else {
-            0.0
         }
     }
 

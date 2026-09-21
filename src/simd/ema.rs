@@ -191,8 +191,7 @@ mod tests {
         use std::time::Duration;
 
         // 30-period EMA — k = 2/(30+1) = 0.06451612...
-        let mut streaming =
-            ExponentialMovingAverage::new(Duration::from_secs(30 * 86400)).unwrap();
+        let mut streaming = ExponentialMovingAverage::new(Duration::from_secs(30 * 86400)).unwrap();
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let values: Vec<f64> = (0..200).map(|i| 50.0 + (i as f64) * 0.3).collect();
 
@@ -236,7 +235,13 @@ mod tests {
         joined.extend(cont);
 
         for (i, (a, b)) in full.iter().zip(joined.iter()).enumerate() {
-            assert!((a - b).abs() < 1e-12, "index {}: full={} joined={}", i, a, b);
+            assert!(
+                (a - b).abs() < 1e-12,
+                "index {}: full={} joined={}",
+                i,
+                a,
+                b
+            );
         }
     }
 }

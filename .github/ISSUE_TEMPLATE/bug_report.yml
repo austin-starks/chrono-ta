@@ -1,0 +1,58 @@
+name: Bug report
+description: Report an incorrect result, state transition, or performance regression.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "2.1.0 or a full commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: path
+    attributes:
+      label: API path
+      options:
+        - next
+        - next_batch
+        - simd module
+        - serialization
+        - packaging or documentation
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include timestamps, values, duration, and a small Rust example.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "rustc version, operating system, architecture, enabled features"
+    validations:
+      required: true
+  - type: checkboxes
+    id: sensitive
+    attributes:
+      label: Data check
+      options:
+        - label: I removed credentials, private market data, and proprietary strategy details.
+          required: true

@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
-use std::time::Duration; // Add this import for std::time::Duration
-use ta::indicators::{ExponentialMovingAverage, SimpleMovingAverage, StandardDeviation};
-use ta::Next;
+use chrono_ta::indicators::{SimpleMovingAverage, StandardDeviation};
+use chrono_ta::Next;
+use std::time::Duration;
 
 #[test]
 fn test_daily_ohlc_no_replacement() {
@@ -75,7 +75,7 @@ fn test_standard_deviation_with_replacement() {
     sd.next((base_time + chrono::Duration::minutes(2), 11.0));
 
     // Update within the same minute bucket - should replace
-    let result1 = sd.next((
+    let _result1 = sd.next((
         base_time + chrono::Duration::minutes(2) + chrono::Duration::seconds(30),
         11.5,
     ));
@@ -87,7 +87,6 @@ fn test_standard_deviation_with_replacement() {
     assert!(result2 > 0.0); // Should have some variance
 }
 
-#[test]
 #[test]
 fn test_transition_from_warmup_to_live() {
     // Simulate warming up with daily data then transitioning to intraday
@@ -145,10 +144,10 @@ fn test_minute_bar_replacement() {
     sma.next((base_time, 100.0));
 
     // Update within the same minute (should replace if detected as 1-minute buckets)
-    let result1 = sma.next((base_time + chrono::Duration::seconds(30), 100.5));
+    let _result1 = sma.next((base_time + chrono::Duration::seconds(30), 100.5));
 
     // Second minute
-    let result2 = sma.next((base_time + chrono::Duration::minutes(1), 101.0));
+    let _result2 = sma.next((base_time + chrono::Duration::minutes(1), 101.0));
 
     // Third minute
     let result3 = sma.next((base_time + chrono::Duration::minutes(2), 102.0));

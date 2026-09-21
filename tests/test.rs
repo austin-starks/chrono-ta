@@ -1,16 +1,11 @@
-extern crate csv;
-extern crate ta;
-
-// TODO: implement some integration tests
-
 #[cfg(test)]
 mod test {
     #[cfg(feature = "serde")]
     mod serde {
         use chrono::Utc;
+        use chrono_ta::indicators::SimpleMovingAverage;
+        use chrono_ta::Next;
         use std::time::Duration;
-        use ta::indicators::SimpleMovingAverage;
-        use ta::Next;
 
         // Simple smoke test that serde works (not sure if this is really necessary)
         #[test]

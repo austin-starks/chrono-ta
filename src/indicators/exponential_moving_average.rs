@@ -320,19 +320,27 @@ mod tests {
 
         // Feed constant value 100.0
         ema.next((now, 100.0));
-        
+
         // Step change to 110.0
         let val_step = ema.next((now + chrono::Duration::minutes(1), 110.0));
-        
+
         // With k ~ 0.0645:
         // val = 0.0645 * 110 + (1 - 0.0645) * 100
         // val = 7.095 + 93.55 = 100.645
-        
+
         // With old buggy k ~ 1.96:
         // val = 1.96 * 110 + (1 - 1.96) * 100
         // val = 215.6 - 96 = 119.6 (Overshoot)
 
-        assert!(val_step < 110.0, "EMA overshot the target value! Value: {}", val_step);
-        assert!(val_step > 100.0, "EMA did not increase! Value: {}", val_step);
+        assert!(
+            val_step < 110.0,
+            "EMA overshot the target value! Value: {}",
+            val_step
+        );
+        assert!(
+            val_step > 100.0,
+            "EMA did not increase! Value: {}",
+            val_step
+        );
     }
 }

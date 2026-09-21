@@ -290,7 +290,12 @@ mod tests {
                     assert!(
                         diff <= tol,
                         "n={} period={}d idx={} scalar={} batch={} diff={}",
-                        n, period_days, i, s, v, diff
+                        n,
+                        period_days,
+                        i,
+                        s,
+                        v,
+                        diff
                     );
                 }
 
@@ -313,7 +318,8 @@ mod tests {
                     assert!(
                         diff <= tol,
                         "post-batch state diverged: scalar={} batch={}",
-                        s, v
+                        s,
+                        v
                     );
                 }
             }
@@ -341,11 +347,7 @@ mod tests {
         let batch = b.next_batch(&inputs);
 
         for (s, v) in scalar.iter().zip(batch.iter()) {
-            assert!(
-                (s - v).abs() < 1e-12,
-                "scalar={} batch={}",
-                s, v
-            );
+            assert!((s - v).abs() < 1e-12, "scalar={} batch={}", s, v);
         }
     }
 }

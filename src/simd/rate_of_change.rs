@@ -51,12 +51,7 @@ pub fn rate_of_change_into(values: &[f64], lag: usize, out: &mut [f64]) {
     let mut i = lag;
     // SIMD body: process 4 outputs at a time.
     while i + LANES <= n {
-        let cur = f64x4::new([
-            values[i],
-            values[i + 1],
-            values[i + 2],
-            values[i + 3],
-        ]);
+        let cur = f64x4::new([values[i], values[i + 1], values[i + 2], values[i + 3]]);
         let prev = f64x4::new([
             values[i - lag],
             values[i + 1 - lag],

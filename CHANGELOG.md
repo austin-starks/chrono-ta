@@ -1,4 +1,19 @@
-#### Unreleased
+# Changelog
+
+## 2.1.0 - Unreleased
+
+- Renamed the project and Cargo package from `ta-rs-improved`/`ta` to
+  `chrono-ta`/`chrono_ta` so the package has a distinct identity and can be
+  published without colliding with upstream `ta`.
+- Added `NextBatch`, SIMD-backed EMA and RSI batches, and public slice-oriented
+  SIMD primitives.
+- Made rolling extrema, maximum drawdown, and maximum drawup amortized O(1) per
+  update while preserving scalar reference tests.
+- Documented elapsed-time windows, same-bucket replacement, upstream
+  differences, migration, and crates.io release status.
+- Added public contribution, security, conduct, CI, and release guidance.
+
+## Earlier upstream history
 
 * Add Weighted Moving Average (WMA)
 

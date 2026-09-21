@@ -162,9 +162,7 @@ mod tests {
     fn parity_sum_random() {
         // pseudo-random deterministic input across non-multiple-of-4 sizes
         for n in [0, 1, 2, 3, 4, 5, 7, 8, 16, 17, 31, 64, 100, 1000, 10_000] {
-            let values: Vec<f64> = (0..n)
-                .map(|i| ((i as f64) * 0.37182).sin() * 1e3)
-                .collect();
+            let values: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.37182).sin() * 1e3).collect();
             let s = sum(&values);
             let r = sum_scalar(&values);
             assert!(
@@ -208,8 +206,7 @@ mod tests {
         use std::time::Duration;
 
         let values = [10.0, 20.0, 30.0, 20.0, 10.0];
-        let mut sd =
-            StandardDeviation::new(Duration::from_secs(60 * 60 * 24 * 365)).unwrap();
+        let mut sd = StandardDeviation::new(Duration::from_secs(60 * 60 * 24 * 365)).unwrap();
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut last = 0.0;
         for (i, &v) in values.iter().enumerate() {

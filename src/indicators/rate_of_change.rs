@@ -50,7 +50,9 @@ impl RateOfChange {
             .cached_window
             .get_or_insert_with(|| self.duration.as_nanos() as i64);
         let cutoff_nanos = current_time.timestamp_nanos_opt().unwrap_or(i64::MIN) - dur_nanos;
-        while self.window.front().map_or(false, |(time, _)| time.timestamp_nanos_opt().unwrap_or(i64::MIN) < cutoff_nanos) {
+        while self.window.front().map_or(false, |(time, _)| {
+            time.timestamp_nanos_opt().unwrap_or(i64::MIN) < cutoff_nanos
+        }) {
             self.window.pop_front();
         }
     }
@@ -118,13 +120,11 @@ impl Next<f64> for RateOfChange {
 
         // Calculate the rate of change if we have at least two data points
         if self.window.len() > 1 {
-            let (oldest_time, oldest_value) =
-                self.window.front().expect("Window has at least one item");
-            let (newest_time, newest_value) =
-                self.window.back().expect("Window has at least one item");
+            let (_, oldest_value) = self.window.front().expect("Window has at least one item");
+            let (_, newest_value) = self.window.back().expect("Window has at least one item");
 
             // Ensure we do not divide by zero
-            if oldest_value.clone() != 0.0 {
+            if *oldest_value != 0.0 {
                 (newest_value - oldest_value) / oldest_value * 100.0
             } else {
                 0.0
@@ -140,7 +140,7 @@ impl NextBatch<f64> for RateOfChange {}
 impl Default for RateOfChange {
     fn default() -> Self {
         // Use std::time::Duration constructor
-        Self::new(Duration::from_secs(14 * 24 * 60 * 60)).unwrap()  // 14 days in seconds
+        Self::new(Duration::from_secs(14 * 24 * 60 * 60)).unwrap() // 14 days in seconds
     }
 }
 

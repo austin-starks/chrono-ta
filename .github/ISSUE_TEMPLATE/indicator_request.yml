@@ -1,0 +1,38 @@
+name: Indicator request
+description: Propose an indicator or a new duration-windowed capability.
+title: "[Indicator]: "
+labels: [enhancement]
+body:
+  - type: input
+    id: indicator
+    attributes:
+      label: Indicator or capability
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Timestamped use case
+      description: Explain why observation-count semantics are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Window and replacement semantics
+      description: Define expiration boundaries and repeated current-bar behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Formula or primary reference
+    validations:
+      required: true
+  - type: textarea
+    id: sketch
+    attributes:
+      label: Proposed Rust API
+      render: rust
+    validations:
+      required: true

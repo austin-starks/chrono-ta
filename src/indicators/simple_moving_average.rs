@@ -54,7 +54,9 @@ impl SimpleMovingAverage {
             .cached_window
             .get_or_insert_with(|| self.duration.as_nanos() as i64);
         let cutoff_nanos = current_time.timestamp_nanos_opt().unwrap_or(i64::MIN) - dur_nanos;
-        while self.window.front().map_or(false, |(time, _)| time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos) {
+        while self.window.front().map_or(false, |(time, _)| {
+            time.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos
+        }) {
             if let Some((_, value)) = self.window.pop_front() {
                 self.sum -= value;
             }
