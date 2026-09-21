@@ -13,7 +13,7 @@ and drawup over elapsed-time windows. Every streaming input carries a UTC
 timestamp, so a 30-day indicator means 30 calendar days of observations rather
 than the last 30 calls.
 
-![Animation comparing observation-count and elapsed-time windows](https://raw.githubusercontent.com/austin-starks/chrono-ta/master/graphic/out/window-semantics.gif)
+![Animation comparing observation-count and elapsed-time windows](https://raw.githubusercontent.com/austin-starks/chrono-ta/7f1cd93ba51417bf90ac134244587beaf692b1ed/graphic/out/window-semantics.gif)
 
 The animation uses the same irregular observations on both sides: upstream
 `ta` retains the last N calls, while `chrono-ta` replaces a repeated time bucket
