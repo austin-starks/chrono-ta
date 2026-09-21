@@ -9,7 +9,7 @@ Timestamp-aware technical indicators for Rust.
 [![Rust](https://img.shields.io/badge/rust-2021-orange)](https://www.rust-lang.org/)
 
 `chrono-ta` computes moving averages, momentum, volatility, extrema, drawdown,
-and drawup over elapsed-time windows. Every streaming input carries a UTC
+crossovers, true range, and VWAP over elapsed-time windows. Every streaming input carries a UTC
 timestamp, so a 30-day indicator means 30 calendar days of observations rather
 than the last 30 calls.
 
@@ -69,14 +69,14 @@ Install the published crate:
 
 ```toml
 [dependencies]
-chrono-ta = "2.1"
+chrono-ta = "2.2"
 ```
 
 Enable serialization when indicator state must survive a restart:
 
 ```toml
 [dependencies]
-chrono-ta = { version = "2.1", features = ["serde"] }
+chrono-ta = { version = "2.2", features = ["serde"] }
 ```
 
 To test an unreleased GitHub revision instead:
@@ -125,6 +125,10 @@ instead of advancing the indicator. Timestamps should therefore arrive in
 nondecreasing order. This behavior is a core difference from upstream `ta`, not
 an incidental optimization.
 
+Indicators that operate on OHLCV bars accept an explicit `bucket_width`. This
+makes the identity of a revisable live bar unambiguous instead of guessing its
+cadence from the rolling window.
+
 ## Batch processing
 
 `NextBatch` returns the same state transition as calling `next` repeatedly.
@@ -157,15 +161,59 @@ contiguous slices.
 
 | Family | Indicators |
 |---|---|
-| Trend | Exponential Moving Average, Simple Moving Average |
+| Trend and composition | Exponential Moving Average, Simple Moving Average, Rolling Sum, Lag / Value Ago, Cross Above, Cross Below |
 | Momentum | Relative Strength Index, Rate of Change |
-| Volatility | Bollinger Bands, Standard Deviation, Mean Absolute Deviation |
+| Volatility | Bollinger Bands, Standard Deviation, Mean Absolute Deviation, True Range, Average True Range |
+| Volume | Rolling VWAP, Anchored VWAP |
 | Extrema and risk | Minimum, Maximum, Max Drawdown, Max Drawup |
 
 The narrower catalog is intentional. Indicators present in upstream `ta`, such
-as MACD, stochastic oscillators, ATR, and OBV, are not currently implemented
+as MACD, stochastic oscillators, and OBV, are not currently implemented
 here. Do not select this crate on the assumption that every upstream indicator
 is available.
+
+`AverageTrueRange` is the arithmetic mean of true ranges inside an elapsed-time
+window; it is not Wilder's observation-count recurrence. `RollingVwap` expires
+contributions by elapsed time. `AnchoredVwap` accumulates until the caller invokes
+`Reset::reset`. Both VWAP variants use typical price `(high + low + close) / 3`.
+
+## OHLCV indicators
+
+`DataItem` provides a validated OHLCV input, while the public `Open`, `High`,
+`Low`, `Close`, and `Volume` traits let applications use their own bar types.
+
+```rust
+use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use chrono_ta::indicators::{AverageTrueRange, RollingVwap};
+use chrono_ta::{DataItem, Next};
+use std::time::Duration;
+
+let start = Utc.with_ymd_and_hms(2026, 9, 20, 14, 30, 0).unwrap();
+let first = DataItem::builder()
+    .open(100.0)
+    .high(104.0)
+    .low(99.0)
+    .close(102.0)
+    .volume(1_000.0)
+    .build()
+    .unwrap();
+let second = DataItem::builder()
+    .open(102.0)
+    .high(106.0)
+    .low(101.0)
+    .close(105.0)
+    .volume(1_500.0)
+    .build()
+    .unwrap();
+
+let bucket = Duration::from_secs(60);
+let mut atr = AverageTrueRange::new(Duration::from_secs(15 * 60), bucket).unwrap();
+let mut vwap = RollingVwap::new(Duration::from_secs(15 * 60), bucket).unwrap();
+
+assert_eq!(atr.next((start, first)), 5.0);
+assert_eq!(atr.next((start + ChronoDuration::minutes(1), second)), 5.0);
+assert!(vwap.next((start, first)).is_some());
+```
 
 ## State and serialization
 

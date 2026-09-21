@@ -4,7 +4,7 @@ use crate::errors::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DataItem {
     open: f64,
     high: f64,
@@ -16,6 +16,111 @@ pub struct DataItem {
 impl DataItem {
     pub fn builder() -> DataItemBuilder {
         DataItemBuilder::new()
+    }
+
+    pub fn open(&self) -> f64 {
+        self.open
+    }
+
+    pub fn high(&self) -> f64 {
+        self.high
+    }
+
+    pub fn low(&self) -> f64 {
+        self.low
+    }
+
+    pub fn close(&self) -> f64 {
+        self.close
+    }
+
+    pub fn volume(&self) -> f64 {
+        self.volume
+    }
+}
+
+/// Supplies an opening price to an indicator.
+pub trait Open {
+    fn open(&self) -> f64;
+}
+
+/// Supplies a high price to an indicator.
+pub trait High {
+    fn high(&self) -> f64;
+}
+
+/// Supplies a low price to an indicator.
+pub trait Low {
+    fn low(&self) -> f64;
+}
+
+/// Supplies a closing price to an indicator.
+pub trait Close {
+    fn close(&self) -> f64;
+}
+
+/// Supplies volume to an indicator.
+pub trait Volume {
+    fn volume(&self) -> f64;
+}
+
+impl Open for DataItem {
+    fn open(&self) -> f64 {
+        self.open
+    }
+}
+
+impl High for DataItem {
+    fn high(&self) -> f64 {
+        self.high
+    }
+}
+
+impl Low for DataItem {
+    fn low(&self) -> f64 {
+        self.low
+    }
+}
+
+impl Close for DataItem {
+    fn close(&self) -> f64 {
+        self.close
+    }
+}
+
+impl Volume for DataItem {
+    fn volume(&self) -> f64 {
+        self.volume
+    }
+}
+
+impl<T: Open + ?Sized> Open for &T {
+    fn open(&self) -> f64 {
+        (*self).open()
+    }
+}
+
+impl<T: High + ?Sized> High for &T {
+    fn high(&self) -> f64 {
+        (*self).high()
+    }
+}
+
+impl<T: Low + ?Sized> Low for &T {
+    fn low(&self) -> f64 {
+        (*self).low()
+    }
+}
+
+impl<T: Close + ?Sized> Close for &T {
+    fn close(&self) -> f64 {
+        (*self).close()
+    }
+}
+
+impl<T: Volume + ?Sized> Volume for &T {
+    fn volume(&self) -> f64 {
+        (*self).volume()
     }
 }
 

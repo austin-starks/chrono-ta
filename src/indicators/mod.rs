@@ -35,3 +35,23 @@ pub use self::rate_of_change::RateOfChange;
 
 mod adaptive;
 pub use self::adaptive::{AdaptiveTimeDetector, DetectedFrequency};
+
+mod fixed_time_bucket;
+
+mod rolling_sum;
+pub use self::rolling_sum::RollingSum;
+
+mod lag;
+pub use self::lag::{Lag, ValueAgo};
+
+mod crossover;
+pub use self::crossover::{CrossAbove, CrossBelow};
+
+mod true_range;
+pub use self::true_range::TrueRange;
+
+mod average_true_range;
+pub use self::average_true_range::AverageTrueRange;
+
+mod vwap;
+pub use self::vwap::{AnchoredVwap, RollingVwap};

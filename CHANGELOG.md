@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.0 - 2026-09-20
+
+- Added exact elapsed-time `RollingSum` and `Lag` / `ValueAgo` indicators.
+- Added replacement-aware `CrossAbove` and `CrossBelow` pair-stream indicators.
+- Added generic OHLCV accessor traits and public `DataItem` getters.
+- Added replacement-aware `TrueRange` and duration-windowed
+  `AverageTrueRange`.
+- Added elapsed-time `RollingVwap` and explicitly resettable `AnchoredVwap`.
+- Added fixed golden vectors, scalar/batch parity, exact-boundary, live-bar
+  replacement, reset, and serde-continuation regression coverage.
+
 ## 2.1.0 - 2026-09-20
 
 - Renamed the project and Cargo package from `ta-rs-improved`/`ta` to

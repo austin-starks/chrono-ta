@@ -1,6 +1,6 @@
 [package]
 name = "chrono-ta"
-version = "2.1.0"
+version = "2.2.0"
 authors = ["Austin Starks <austin@starks-technology.com>"]
 edition = "2021"
 description = "Timestamp-aware, duration-windowed technical indicators for Rust"
