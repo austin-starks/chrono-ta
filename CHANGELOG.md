@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.2 - 2026-09-20
+
+- Replaced the Alpaca walkthrough with Public's documented one-minute bars,
+  access-token flow, and regular-session response shape.
+- Added a guarded Public order-submission example, operational safety checklist,
+  and NexusTrade's Public referral link.
+
 ## 2.2.1 - 2026-09-20
 
 - Added a prominent explanation of how NexusTrade drives the crate's

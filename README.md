@@ -133,10 +133,15 @@ a separately guarded broker adapter.
 
 ### Query real market data
 
-This example queries one-minute stock bars from Alpaca's
-[historical bars API](https://docs.alpaca.markets/us/reference/stockbarsingle-1).
-The same shape works with another provider: preserve the provider timestamp and
-map its close into `(DateTime<Utc>, f64)`.
+This example queries one-minute regular-session stock bars from Public's
+[historical bars API](https://public.com/api/docs/resources/market-data/get-bars-v2-with-aggregation).
+Need a Public account? You can open one through
+[NexusTrade's Public referral link](https://public.com/nexustrade).
+
+Generate a Public secret in your account settings, exchange it for an access
+token using the [Public quickstart](https://public.com/api/docs/quickstart), and
+keep the resulting token on the server as `PUBLIC_ACCESS_TOKEN`. Never put a
+brokerage secret or access token in browser code.
 
 Application dependencies (these are not required by `chrono-ta` itself):
 
@@ -146,7 +151,9 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-ta = "2.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
 ```
 
 ```rust
@@ -156,64 +163,49 @@ use std::{env, error::Error};
 
 #[derive(Debug, Deserialize)]
 struct Bar {
-    t: DateTime<Utc>,
-    c: f64,
+    timestamp: DateTime<Utc>,
+    close: String,
+}
+
+#[derive(Default, Deserialize)]
+struct MarketSession {
+    #[serde(default)]
+    bars: Vec<Bar>,
 }
 
 #[derive(Deserialize)]
-struct BarsPage {
-    bars: Vec<Bar>,
-    next_page_token: Option<String>,
+#[serde(rename_all = "camelCase")]
+struct BarsResponse {
+    regular_market: MarketSession,
 }
 
 async fn query_bars(
     client: &reqwest::Client,
     symbol: &str,
-    start: &str,
-    end: &str,
 ) -> Result<Vec<Bar>, Box<dyn Error>> {
-    let key = env::var("ALPACA_API_KEY_ID")?;
-    let secret = env::var("ALPACA_API_SECRET_KEY")?;
-    let url = format!("https://data.alpaca.markets/v2/stocks/{symbol}/bars");
-    let mut token: Option<String> = None;
-    let mut result = Vec::new();
+    let access_token = env::var("PUBLIC_ACCESS_TOKEN")?;
+    let url = format!(
+        "https://api.public.com/userapigateway/historicdata/EQUITY/{symbol}/DAY/ONE_MINUTE"
+    );
 
-    loop {
-        let mut query = vec![
-            ("timeframe", "1Min".to_owned()),
-            ("start", start.to_owned()),
-            ("end", end.to_owned()),
-            ("limit", "10000".to_owned()),
-            ("feed", "iex".to_owned()),
-            ("sort", "asc".to_owned()),
-        ];
-        if let Some(value) = token.as_ref() {
-            query.push(("page_token", value.clone()));
-        }
+    let response: BarsResponse = client
+        .get(url)
+        .bearer_auth(access_token)
+        .query(&[("tradingSessionToggle", "REGULAR_HOURS")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
-        let page: BarsPage = client
-            .get(&url)
-            .header("APCA-API-KEY-ID", &key)
-            .header("APCA-API-SECRET-KEY", &secret)
-            .query(&query)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        result.extend(page.bars);
-        token = page.next_page_token;
-        if token.is_none() {
-            return Ok(result);
-        }
-    }
+    Ok(response.regular_market.bars)
 }
 ```
 
-The loop follows `next_page_token` instead of silently treating the first page
-as the whole history. Select the feed and adjustment policy deliberately; those
-choices change the observations that reach the strategy.
+Public splits its response into pre-market, regular-market, and after-market
+sections. This example deliberately asks for regular hours and consumes only
+`regularMarket`; change that policy consciously because session selection
+changes the observations that reach the strategy.
 
 ### Turn bars into buy, sell, or hold decisions
 
@@ -270,29 +262,77 @@ impl EmaCrossStrategy {
 Feed the queried bars through the strategy:
 
 ```rust
-let bars = query_bars(
-    &reqwest::Client::new(),
-    "SPY",
-    "2026-09-01T13:30:00Z",
-    "2026-09-01T20:00:00Z",
-).await?;
+let bars = query_bars(&reqwest::Client::new(), "SPY").await?;
 let mut strategy = EmaCrossStrategy::new()?;
 
 for bar in bars {
-    match strategy.on_close(bar.t, bar.c) {
-        Decision::Buy => println!("{} BUY SPY", bar.t),
-        Decision::Sell => println!("{} SELL SPY", bar.t),
+    let close: f64 = bar.close.parse()?;
+    match strategy.on_close(bar.timestamp, close) {
+        Decision::Buy => println!("{} BUY SPY", bar.timestamp),
+        Decision::Sell => println!("{} SELL SPY", bar.timestamp),
         Decision::Hold => {}
     }
 }
 ```
 
-That loop is suitable for research, backtests, or paper-signal generation. A
-real bot should process only unseen completed bars, persist both its last bar
-timestamp and serialized indicator state, reconcile the actual brokerage
-position before acting, and use an idempotent client order ID. Start with a
-paper-trading endpoint; do not connect historical replay code directly to a
-live brokerage account.
+That loop is suitable for research, backtests, or signal generation. For a bot,
+route a decision through a separately guarded Public adapter. Public accepts a
+caller-supplied UUID as the idempotent order ID:
+
+```rust
+use serde_json::json;
+use std::{env, error::Error};
+use uuid::Uuid;
+
+async fn submit_public_order(
+    client: &reqwest::Client,
+    symbol: &str,
+    decision: Decision,
+) -> Result<Option<Uuid>, Box<dyn Error>> {
+    let side = match decision {
+        Decision::Buy => "BUY",
+        Decision::Sell => "SELL",
+        Decision::Hold => return Ok(None),
+    };
+
+    // Historical replay must never be able to satisfy this guard accidentally.
+    if env::var("ENABLE_PUBLIC_ORDER_SUBMISSION").as_deref() != Ok("I_UNDERSTAND") {
+        return Err("live Public order submission is disabled".into());
+    }
+
+    let access_token = env::var("PUBLIC_ACCESS_TOKEN")?;
+    let account_id = env::var("PUBLIC_ACCOUNT_ID")?;
+    let order_id = Uuid::new_v4();
+    let body = json!({
+        "orderId": order_id.to_string(),
+        "instrument": { "symbol": symbol, "type": "EQUITY" },
+        "orderSide": side,
+        "orderType": "MARKET",
+        "expiration": { "timeInForce": "DAY" },
+        "quantity": "1"
+    });
+
+    client
+        .post(format!(
+            "https://api.public.com/userapigateway/trading/{account_id}/order"
+        ))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    Ok(Some(order_id))
+}
+```
+
+This is the final transport step, not a complete risk system. Before enabling
+it, call Public's
+[preflight endpoint](https://public.com/api/docs/resources/order-placement/preflight-single-leg),
+process only unseen completed bars, persist the last bar timestamp and
+serialized indicator state, reconcile the actual brokerage position, enforce
+position/notional limits, and poll the returned order ID because placement is
+asynchronous. Do not connect historical replay code directly to a live account.
 
 Run the repository's provider-neutral version with:
 
