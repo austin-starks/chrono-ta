@@ -2,3 +2,6 @@
 **/*.rs.bk
 Cargo.lock
 .vscode
+graphic/node_modules/
+graphic/out/*
+!graphic/out/window-semantics.gif

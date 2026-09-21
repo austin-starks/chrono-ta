@@ -12,15 +12,15 @@ documentation = "https://docs.rs/chrono-ta"
 readme = "README.md"
 categories = ["science", "algorithms"]
 include = [
-    "src/**/*",
-    "examples/**/*",
-    "tests/**/*",
-    "Cargo.toml",
-    "README.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "LICENSE",
-    "SECURITY.md"
+    "/src/**/*",
+    "/examples/**/*",
+    "/tests/**/*",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/SECURITY.md"
 ]
 
 [dependencies]

@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.0 - Unreleased
+## 2.1.0 - 2026-09-20
 
 - Renamed the project and Cargo package from `ta-rs-improved`/`ta` to
   `chrono-ta`/`chrono_ta` so the package has a distinct identity and can be
@@ -11,6 +11,8 @@
   update while preserving scalar reference tests.
 - Documented elapsed-time windows, same-bucket replacement, upstream
   differences, migration, and crates.io release status.
+- Added a source-controlled animation that demonstrates the semantic difference
+  between observation-count and elapsed-time windows.
 - Added public contribution, security, conduct, CI, and release guidance.
 
 ## Earlier upstream history

@@ -1,0 +1,23 @@
+{
+  "name": "chrono-ta-readme-graphic",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Remotion source for the chrono-ta README animation",
+  "license": "MIT",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "render": "remotion render WindowSemantics out/window-semantics.mp4 --codec=h264",
+    "render-gif": "remotion render WindowSemantics out/window-semantics.gif --codec=gif --every-nth-frame=2",
+    "still": "remotion still WindowSemantics out/window-semantics.png --frame=205"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.512",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.512"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "typescript": "5.9.3"
+  }
+}

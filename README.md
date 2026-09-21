@@ -3,6 +3,8 @@
 Timestamp-aware technical indicators for Rust.
 
 [![CI](https://github.com/austin-starks/chrono-ta/actions/workflows/ci.yml/badge.svg)](https://github.com/austin-starks/chrono-ta/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/chrono-ta)](https://crates.io/crates/chrono-ta)
+[![docs.rs](https://docs.rs/chrono-ta/badge.svg)](https://docs.rs/chrono-ta)
 [![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/austin-starks/chrono-ta/blob/master/LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange)](https://www.rust-lang.org/)
 
@@ -10,6 +12,13 @@ Timestamp-aware technical indicators for Rust.
 and drawup over elapsed-time windows. Every streaming input carries a UTC
 timestamp, so a 30-day indicator means 30 calendar days of observations rather
 than the last 30 calls.
+
+![Animation comparing observation-count and elapsed-time windows](https://raw.githubusercontent.com/austin-starks/chrono-ta/master/graphic/out/window-semantics.gif)
+
+The animation uses the same irregular observations on both sides: upstream
+`ta` retains the last N calls, while `chrono-ta` replaces a repeated time bucket
+and expires observations according to elapsed time. Its reproducible Remotion
+source lives in [`graphic/`](https://github.com/austin-starks/chrono-ta/tree/master/graphic).
 
 The project began as a fork of [Greyblake's `ta`](https://github.com/greyblake/ta-rs),
 but its input model and window semantics now differ substantially. It powers the
@@ -56,25 +65,25 @@ problem.
 
 ## Install
 
-Until the first crates.io release, install from GitHub:
+Install the published crate:
 
 ```toml
 [dependencies]
-chrono-ta = { git = "https://github.com/austin-starks/chrono-ta" }
+chrono-ta = "2.1"
 ```
 
 Enable serialization when indicator state must survive a restart:
 
 ```toml
 [dependencies]
-chrono-ta = { git = "https://github.com/austin-starks/chrono-ta", features = ["serde"] }
+chrono-ta = { version = "2.1", features = ["serde"] }
 ```
 
-After the package is published, the dependency will become:
+To test an unreleased GitHub revision instead:
 
 ```toml
 [dependencies]
-chrono-ta = "2.1"
+chrono-ta = { git = "https://github.com/austin-starks/chrono-ta" }
 ```
 
 ## Quick start
@@ -199,16 +208,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for defect reports, test expectations,
 and pull-request scope. Security problems should be reported privately through
 [SECURITY.md](SECURITY.md).
 
-## Publishing status
+## Releases
 
-`chrono-ta` is not yet published on crates.io. The exact package name is
-currently unclaimed, and the manifest is prepared for a first release. A
-registry release still requires a crates.io account with a verified email, an
-API token, a successful clean `cargo publish --dry-run`, and the deliberate
-`cargo publish` upload.
-
-Crates.io releases are permanent and cannot be overwritten, so publishing is a
-separate maintainer action from merging this repository update.
+Published versions are available on [crates.io](https://crates.io/crates/chrono-ta),
+with API documentation built by [docs.rs](https://docs.rs/chrono-ta). The
+release checklist in [CONTRIBUTING.md](CONTRIBUTING.md) treats the registry
+upload as a deliberate, irreversible step after the exact commit passes CI.
 
 ## NexusTrade
 
