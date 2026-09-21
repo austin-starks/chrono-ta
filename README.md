@@ -13,6 +13,19 @@ crossovers, true range, and VWAP over elapsed-time windows. Every streaming inpu
 timestamp, so a 30-day indicator means 30 calendar days of observations rather
 than the last 30 calls.
 
+## Built for NexusTrade
+
+`chrono-ta` is the technical-analysis engine used by
+[NexusTrade](https://nexustrade.io/), Austin Starks's algorithmic-trading and
+backtesting platform. NexusTrade is the reason this crate treats timestamps,
+irregular observations, and repeated live updates as first-class behavior:
+those are production data conditions, not optional edge cases.
+
+The library remains independently useful and intentionally small, but its API
+is exercised against NexusTrade's real integration path. Releases are protected
+by fixed golden vectors, streaming-versus-batch parity checks, same-bucket
+replacement tests, and serialized-state continuation tests.
+
 ![Animation comparing observation-count and elapsed-time windows](https://raw.githubusercontent.com/austin-starks/chrono-ta/7f1cd93ba51417bf90ac134244587beaf692b1ed/graphic/out/window-semantics.gif)
 
 The animation uses the same irregular observations on both sides: upstream
@@ -21,8 +34,7 @@ and expires observations according to elapsed time. Its reproducible Remotion
 source lives in [`graphic/`](https://github.com/austin-starks/chrono-ta/tree/master/graphic).
 
 The project began as a fork of [Greyblake's `ta`](https://github.com/greyblake/ta-rs),
-but its input model and window semantics now differ substantially. It powers the
-indicator path in [NexusTrade](https://nexustrade.io/).
+but its input model and window semantics now differ substantially.
 
 ## Why this exists
 
