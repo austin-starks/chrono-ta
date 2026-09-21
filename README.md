@@ -123,6 +123,183 @@ assert_eq!(
 All indicators implement `Next<T>`. They also implement `Reset`, `Debug`,
 `Display`, `Default`, and `Clone` where appropriate.
 
+## From market data to an automated strategy
+
+`chrono-ta` owns indicator state and signal calculation. It deliberately does
+not own market-data credentials, brokerage accounts, or order submission. A
+trading application queries timestamped observations from its data provider,
+feeds each completed bar into a strategy, and passes the resulting decision to
+a separately guarded broker adapter.
+
+### Query real market data
+
+This example queries one-minute stock bars from Alpaca's
+[historical bars API](https://docs.alpaca.markets/us/reference/stockbarsingle-1).
+The same shape works with another provider: preserve the provider timestamp and
+map its close into `(DateTime<Utc>, f64)`.
+
+Application dependencies (these are not required by `chrono-ta` itself):
+
+```toml
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+chrono-ta = "2.2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use std::{env, error::Error};
+
+#[derive(Debug, Deserialize)]
+struct Bar {
+    t: DateTime<Utc>,
+    c: f64,
+}
+
+#[derive(Deserialize)]
+struct BarsPage {
+    bars: Vec<Bar>,
+    next_page_token: Option<String>,
+}
+
+async fn query_bars(
+    client: &reqwest::Client,
+    symbol: &str,
+    start: &str,
+    end: &str,
+) -> Result<Vec<Bar>, Box<dyn Error>> {
+    let key = env::var("ALPACA_API_KEY_ID")?;
+    let secret = env::var("ALPACA_API_SECRET_KEY")?;
+    let url = format!("https://data.alpaca.markets/v2/stocks/{symbol}/bars");
+    let mut token: Option<String> = None;
+    let mut result = Vec::new();
+
+    loop {
+        let mut query = vec![
+            ("timeframe", "1Min".to_owned()),
+            ("start", start.to_owned()),
+            ("end", end.to_owned()),
+            ("limit", "10000".to_owned()),
+            ("feed", "iex".to_owned()),
+            ("sort", "asc".to_owned()),
+        ];
+        if let Some(value) = token.as_ref() {
+            query.push(("page_token", value.clone()));
+        }
+
+        let page: BarsPage = client
+            .get(&url)
+            .header("APCA-API-KEY-ID", &key)
+            .header("APCA-API-SECRET-KEY", &secret)
+            .query(&query)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        result.extend(page.bars);
+        token = page.next_page_token;
+        if token.is_none() {
+            return Ok(result);
+        }
+    }
+}
+```
+
+The loop follows `next_page_token` instead of silently treating the first page
+as the whole history. Select the feed and adjustment policy deliberately; those
+choices change the observations that reach the strategy.
+
+### Turn bars into buy, sell, or hold decisions
+
+Here is an EMA-crossover signal strategy. A repeated update inside the same
+one-minute bar replaces that bar's current state, so a live feed correction does
+not create a phantom second crossover.
+
+```rust
+use chrono::{DateTime, Utc};
+use chrono_ta::indicators::{CrossAbove, CrossBelow, ExponentialMovingAverage};
+use chrono_ta::Next;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Buy,
+    Sell,
+    Hold,
+}
+
+struct EmaCrossStrategy {
+    fast: ExponentialMovingAverage,
+    slow: ExponentialMovingAverage,
+    cross_above: CrossAbove,
+    cross_below: CrossBelow,
+}
+
+impl EmaCrossStrategy {
+    fn new() -> Result<Self, chrono_ta::errors::TaError> {
+        Ok(Self {
+            fast: ExponentialMovingAverage::new(Duration::from_secs(5 * 60))?,
+            slow: ExponentialMovingAverage::new(Duration::from_secs(20 * 60))?,
+            cross_above: CrossAbove::new(Duration::from_secs(60))?,
+            cross_below: CrossBelow::new(Duration::from_secs(60))?,
+        })
+    }
+
+    fn on_close(&mut self, timestamp: DateTime<Utc>, close: f64) -> Decision {
+        let fast = self.fast.next((timestamp, close));
+        let slow = self.slow.next((timestamp, close));
+        let pair = (fast, slow);
+
+        if self.cross_above.next((timestamp, pair)) {
+            Decision::Buy
+        } else if self.cross_below.next((timestamp, pair)) {
+            Decision::Sell
+        } else {
+            Decision::Hold
+        }
+    }
+}
+```
+
+Feed the queried bars through the strategy:
+
+```rust
+let bars = query_bars(
+    &reqwest::Client::new(),
+    "SPY",
+    "2026-09-01T13:30:00Z",
+    "2026-09-01T20:00:00Z",
+).await?;
+let mut strategy = EmaCrossStrategy::new()?;
+
+for bar in bars {
+    match strategy.on_close(bar.t, bar.c) {
+        Decision::Buy => println!("{} BUY SPY", bar.t),
+        Decision::Sell => println!("{} SELL SPY", bar.t),
+        Decision::Hold => {}
+    }
+}
+```
+
+That loop is suitable for research, backtests, or paper-signal generation. A
+real bot should process only unseen completed bars, persist both its last bar
+timestamp and serialized indicator state, reconcile the actual brokerage
+position before acting, and use an idempotent client order ID. Start with a
+paper-trading endpoint; do not connect historical replay code directly to a
+live brokerage account.
+
+Run the repository's provider-neutral version with:
+
+```bash
+cargo run --example ema_crossover
+```
+
 ## Current-bar replacement
 
 Streaming feeds often send several revisions of a bar before it closes. The
