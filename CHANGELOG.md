@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.1 - 2026-09-20
+
+- Added a prominent explanation of how NexusTrade drives the crate's
+  timestamp, irregular-data, and live-bar replacement semantics.
+- Added a concrete, paginated market-data query walkthrough and a
+  replacement-aware EMA crossover strategy workflow.
+- Added a compiled `ema_crossover` example for provider-neutral automated
+  strategy integration.
+
 ## 2.2.0 - 2026-09-20
 
 - Added exact elapsed-time `RollingSum` and `Lag` / `ValueAgo` indicators.
