@@ -19,8 +19,6 @@ const colors = {
   orange: "#D85B2A",
   orangeDark: "#A83C17",
   orangeSoft: "#F8DCCF",
-  green: "#30715A",
-  greenSoft: "#DCECE4",
 };
 
 const font =
@@ -119,9 +117,7 @@ const dotEnter = (frame: number, arrival: number, fps: number) =>
 
 const EventStrip = () => {
   const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
   const active = [...incoming].reverse().find((item) => frame >= item.frame);
-  const progress = active ? dotEnter(frame, active.frame, fps) : 0;
   const label =
     frame < 114
       ? "irregular observations arrive"
@@ -148,8 +144,6 @@ const EventStrip = () => {
           height: 8,
           borderRadius: "50%",
           background: colors.orange,
-          transform: `scale(${0.8 + progress * 0.5})`,
-          boxShadow: `0 0 0 ${8 * progress}px rgba(216, 91, 42, ${0.16 * (1 - progress)})`,
         }}
       />
       <div
@@ -441,7 +435,7 @@ const ChronoPanel = () => {
             </span>
           ) : null}
           {frame >= 194 ? (
-            <span style={{color: colors.green, fontSize: 13, fontWeight: 800}}>
+            <span style={{color: colors.orangeDark, fontSize: 13, fontWeight: 800}}>
               expired by the clock
             </span>
           ) : null}
@@ -453,14 +447,6 @@ const ChronoPanel = () => {
 
 export const WindowSemantics = () => {
   const frame = useCurrentFrame();
-  const fadeIn = interpolate(frame, [0, 12], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const fadeOut = interpolate(frame, [228, 239], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
   const conclusion = interpolate(frame, [194, 208], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
@@ -472,7 +458,6 @@ export const WindowSemantics = () => {
         background: colors.background,
         color: colors.ink,
         fontFamily: font,
-        opacity: fadeIn * fadeOut,
         padding: "31px 48px 27px",
       }}
     >
@@ -506,7 +491,7 @@ export const WindowSemantics = () => {
             “Window” can mean two different things.
           </div>
         </div>
-        <Pill background={colors.greenSoft} color={colors.green} style={{marginTop: 7}}>
+        <Pill background={colors.upstreamSoft} color={colors.muted} style={{marginTop: 7}}>
           same observations
         </Pill>
       </div>

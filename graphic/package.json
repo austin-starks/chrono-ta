@@ -6,8 +6,8 @@
   "license": "MIT",
   "scripts": {
     "check": "tsc --noEmit",
-    "render": "remotion render WindowSemantics out/window-semantics.mp4 --codec=h264",
-    "render-gif": "remotion render WindowSemantics out/window-semantics.gif --codec=gif --every-nth-frame=2",
+    "render": "remotion render WindowSemantics out/window-semantics.mp4 --codec=h264 --crf=18",
+    "render-gif": "sh scripts/render-gif.sh",
     "still": "remotion still WindowSemantics out/window-semantics.png --frame=205"
   },
   "dependencies": {
