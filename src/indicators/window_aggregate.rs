@@ -6,6 +6,10 @@
 //! indicator). The aggregates assume strictly positive inputs (prices /
 //! equity), which is the only domain the indicators are fed.
 
+use std::collections::VecDeque;
+
+use chrono::{DateTime, Utc};
+
 /// A segment aggregate that forms a monoid under [`combine`](WindowAggregate::combine).
 /// `self` is the older (left) segment, `other` the newer (right) one; order matters.
 pub trait WindowAggregate: Clone {
@@ -104,6 +108,86 @@ impl WindowAggregate for DrawdownAgg {
 
     fn ratio(&self) -> f64 {
         self.ratio
+    }
+}
+
+/// Bare window extrema: highest high and lowest low. One `MonoidWindow` per
+/// leg (highs, lows); the pair answers range queries in O(1).
+#[derive(Debug, Clone)]
+pub struct MinMaxAgg {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl WindowAggregate for MinMaxAgg {
+    fn leaf(value: f64) -> Self {
+        Self {
+            lo: value,
+            hi: value,
+        }
+    }
+
+    fn combine(&self, other: &Self) -> Self {
+        Self {
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+        }
+    }
+
+    /// No ratio metric for bare extrema; read [`MinMaxAgg::lo`]/[`MinMaxAgg::hi`].
+    fn ratio(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Paired high/low [`MonoidWindow`]s over committed (sealed) bars plus their
+/// timestamps for lockstep expiry. The live bar stays out (see `MaxDrawdown`'s
+/// `swag`): the caller commits the previous live bar on append, pops it
+/// untouched on replace, and folds the live values in at query time via
+/// [`SlidingExtrema::extremes`]. All ops amortized O(1).
+#[derive(Debug, Clone, Default)]
+pub struct SlidingExtrema {
+    highs: MonoidWindow<MinMaxAgg>,
+    lows: MonoidWindow<MinMaxAgg>,
+    stamps: VecDeque<DateTime<Utc>>,
+}
+
+impl SlidingExtrema {
+    pub fn commit(&mut self, timestamp: DateTime<Utc>, high: f64, low: f64) {
+        self.highs.push_back(high);
+        self.lows.push_back(low);
+        self.stamps.push_back(timestamp);
+    }
+
+    pub fn expire_before(&mut self, cutoff_nanos: i64) {
+        while self
+            .stamps
+            .front()
+            .is_some_and(|ts| ts.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff_nanos)
+        {
+            self.stamps.pop_front();
+            self.highs.pop_front();
+            self.lows.pop_front();
+        }
+    }
+
+    /// Highest high / lowest low over committed bars and the live bar.
+    pub fn extremes(&self, live_high: f64, live_low: f64) -> (f64, f64) {
+        let hi = self
+            .highs
+            .aggregate()
+            .map_or(live_high, |agg| agg.hi.max(live_high));
+        let lo = self
+            .lows
+            .aggregate()
+            .map_or(live_low, |agg| agg.lo.min(live_low));
+        (hi, lo)
+    }
+
+    pub fn clear(&mut self) {
+        self.highs.clear();
+        self.lows.clear();
+        self.stamps.clear();
     }
 }
 

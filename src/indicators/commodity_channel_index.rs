@@ -23,7 +23,8 @@ use crate::{Close, High, Low, Next, NextBatch, Reset};
 pub struct CommodityChannelIndex {
     window: Duration,
     buckets: FixedTimeBucket,
-    bars: VecDeque<(DateTime<Utc>, f64, f64, f64)>,
+    bars: VecDeque<(DateTime<Utc>, f64)>,
+    tp_sum: f64,
     constant: f64,
 }
 
@@ -41,22 +42,28 @@ impl CommodityChannelIndex {
             window,
             buckets: FixedTimeBucket::new(bucket_width)?,
             bars: VecDeque::new(),
+            tp_sum: 0.0,
             constant,
         })
     }
 
-    fn remove_expired(&mut self, now: DateTime<Utc>) {
+    fn cutoff_nanos(&self, now: DateTime<Utc>) -> i64 {
         let nanos = i64::try_from(self.window.as_nanos()).unwrap_or(i64::MAX);
-        let cutoff = now
-            .timestamp_nanos_opt()
+        now.timestamp_nanos_opt()
             .unwrap_or(i64::MIN)
-            .saturating_sub(nanos);
+            .saturating_sub(nanos)
+    }
+
+    fn remove_expired(&mut self, now: DateTime<Utc>) {
+        let cutoff = self.cutoff_nanos(now);
         while self
             .bars
             .front()
-            .is_some_and(|(ts, _, _, _)| ts.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff)
+            .is_some_and(|(ts, _)| ts.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff)
         {
-            self.bars.pop_front();
+            if let Some((_, tp)) = self.bars.pop_front() {
+                self.tp_sum -= tp;
+            }
         }
     }
 }
@@ -69,23 +76,34 @@ where
 
     fn next(&mut self, (timestamp, input): (DateTime<Utc>, T)) -> Self::Output {
         let update = self.buckets.update(timestamp);
-        self.remove_expired(timestamp);
         if update == BucketUpdate::Replace {
-            self.bars.pop_back();
+            if let Some((_, tp)) = self.bars.pop_back() {
+                self.tp_sum -= tp;
+            }
         }
-        self.bars
-            .push_back((timestamp, input.high(), input.low(), input.close()));
+        let typical = (input.high() + input.low() + input.close()) / 3.0;
+        self.tp_sum += typical;
+        self.bars.push_back((timestamp, typical));
+        self.remove_expired(timestamp);
 
-        let typical: Vec<f64> = self
-            .bars
-            .iter()
-            .map(|(_, h, l, c)| (h + l + c) / 3.0)
-            .collect();
-        let mean = typical.iter().sum::<f64>() / typical.len() as f64;
-        let deviation = typical.iter().map(|tp| (tp - mean).abs()).sum::<f64>()
-            / typical.len() as f64;
-        let current = *typical.last().unwrap_or(&mean);
-        if deviation == 0.0 {
+        // The mean comes from the running sum; the mean deviation still needs
+        // one pass — it is defined around the current mean, so it cannot be
+        // maintained incrementally. The flat check is exact (highest == lowest)
+        // rather than `deviation == 0.0`: float dust in the running mean would
+        // otherwise miss a truly flat window and blow the ratio up.
+        let n = self.bars.len() as f64;
+        let mean = self.tp_sum / n;
+        let mut highest = f64::NEG_INFINITY;
+        let mut lowest = f64::INFINITY;
+        let mut dev_sum = 0.0;
+        for (_, tp) in self.bars.iter() {
+            highest = highest.max(*tp);
+            lowest = lowest.min(*tp);
+            dev_sum += (tp - mean).abs();
+        }
+        let deviation = dev_sum / n;
+        let current = self.bars.back().map(|(_, tp)| *tp).unwrap_or(mean);
+        if highest == lowest {
             0.0
         } else {
             (current - mean) / (self.constant * deviation)
@@ -99,6 +117,7 @@ impl Reset for CommodityChannelIndex {
     fn reset(&mut self) {
         self.buckets.reset();
         self.bars.clear();
+        self.tp_sum = 0.0;
     }
 }
 
@@ -166,5 +185,69 @@ mod tests {
         let mut cci = CommodityChannelIndex::default();
         let out = cci.next((t, bar(10.0, 10.0, 10.0)));
         assert_eq!(out, 0.0);
+    }
+
+    /// Incremental mean matches the definitional rescan under mixed appends,
+    /// same-bucket revisions, and evictions. Summation order differs, so this
+    /// asserts approximate (1e-9) equality.
+    #[test]
+    fn equivalence_with_naive_under_appends_replaces_and_evictions() {
+        let mut state: u64 = 0x8f2b4c6d1e3a5967;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let start = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+
+        for cfg in 0..100 {
+            let window_days = 2 + rng() % 30;
+            let mut cci = CommodityChannelIndex::new(
+                Duration::from_secs(window_days * 86_400),
+                Duration::from_secs(86_400),
+                0.015,
+            )
+            .unwrap();
+            let mut bars: Vec<(i64, f64)> = Vec::new();
+            let mut day: i64 = 0;
+            for _ in 0..400 {
+                let roll = rng() % 10;
+                if roll < 3 && !bars.is_empty() {
+                    // Same bucket: revise the live bar.
+                } else if roll < 4 {
+                    day += 1 + (rng() % 40) as i64;
+                } else {
+                    day += 1;
+                }
+                let base = 10.0 + (rng() % 10_000) as f64 / 100.0;
+                let h = base + (rng() % 500) as f64 / 100.0;
+                let l = base - (rng() % 500) as f64 / 100.0;
+                let got = cci.next((start + chrono::Duration::days(day), bar(h, l, base)));
+                let tp = (h + l + base) / 3.0;
+                if roll < 3 && !bars.is_empty() {
+                    *bars.last_mut().unwrap() = (day, tp);
+                } else {
+                    bars.push((day, tp));
+                }
+                bars.retain(|(d, _)| *d > day - window_days as i64);
+                let mean = bars.iter().map(|(_, tp)| tp).sum::<f64>() / bars.len() as f64;
+                let dev =
+                    bars.iter().map(|(_, tp)| (tp - mean).abs()).sum::<f64>() / bars.len() as f64;
+                let current = bars.last().map(|(_, tp)| *tp).unwrap_or(mean);
+                let expected = if dev == 0.0 {
+                    0.0
+                } else {
+                    (current - mean) / (0.015 * dev)
+                };
+                // Relative tolerance: the running mean carries dust that the
+                // ratio can amplify on large-magnitude outputs.
+                let tol = 1e-9 * expected.abs().max(1.0);
+                assert!(
+                    (got - expected).abs() <= tol,
+                    "mismatch: cfg={cfg} day={day} bars={bars:?} got {got} vs {expected}"
+                );
+            }
+        }
     }
 }

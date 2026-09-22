@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::fixed_time_bucket::{BucketUpdate, FixedTimeBucket};
+use super::window_aggregate::SlidingExtrema;
 use crate::errors::{Result, TaError};
 use crate::{Close, High, Low, Next, NextBatch, Reset};
 
@@ -23,6 +24,12 @@ pub struct WilliamsR {
     window: Duration,
     buckets: FixedTimeBucket,
     bars: VecDeque<(DateTime<Utc>, f64, f64, f64)>,
+    /// Highest/lowest over committed bars; the live bar folds in at query.
+    /// Derived state, rebuilt from `bars` after deserialize via `ensure_built`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    ext: SlidingExtrema,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    ext_built: bool,
 }
 
 impl WilliamsR {
@@ -34,15 +41,20 @@ impl WilliamsR {
             window,
             buckets: FixedTimeBucket::new(bucket_width)?,
             bars: VecDeque::new(),
+            ext: SlidingExtrema::default(),
+            ext_built: true,
         })
     }
 
-    fn remove_expired(&mut self, now: DateTime<Utc>) {
+    fn cutoff_nanos(&self, now: DateTime<Utc>) -> i64 {
         let nanos = i64::try_from(self.window.as_nanos()).unwrap_or(i64::MAX);
-        let cutoff = now
-            .timestamp_nanos_opt()
+        now.timestamp_nanos_opt()
             .unwrap_or(i64::MIN)
-            .saturating_sub(nanos);
+            .saturating_sub(nanos)
+    }
+
+    fn remove_expired(&mut self, now: DateTime<Utc>) {
+        let cutoff = self.cutoff_nanos(now);
         while self
             .bars
             .front()
@@ -50,6 +62,19 @@ impl WilliamsR {
         {
             self.bars.pop_front();
         }
+        self.ext.expire_before(cutoff);
+    }
+
+    fn ensure_built(&mut self) {
+        if self.ext_built {
+            return;
+        }
+        self.ext.clear();
+        let committed = self.bars.len().saturating_sub(1);
+        for &(ts, h, l, _) in self.bars.iter().take(committed) {
+            self.ext.commit(ts, h, l);
+        }
+        self.ext_built = true;
     }
 }
 
@@ -60,24 +85,18 @@ where
     type Output = f64;
 
     fn next(&mut self, (timestamp, input): (DateTime<Utc>, T)) -> Self::Output {
+        self.ensure_built();
         let update = self.buckets.update(timestamp);
-        self.remove_expired(timestamp);
         if update == BucketUpdate::Replace {
             self.bars.pop_back();
+        } else if let Some(&(ts, h, l, _)) = self.bars.back() {
+            self.ext.commit(ts, h, l);
         }
         let (high, low, close) = (input.high(), input.low(), input.close());
         self.bars.push_back((timestamp, high, low, close));
+        self.remove_expired(timestamp);
 
-        let highest = self
-            .bars
-            .iter()
-            .map(|(_, h, _, _)| *h)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let lowest = self
-            .bars
-            .iter()
-            .map(|(_, _, l, _)| *l)
-            .fold(f64::INFINITY, f64::min);
+        let (highest, lowest) = self.ext.extremes(high, low);
         if highest > lowest {
             -100.0 * (highest - close) / (highest - lowest)
         } else {
@@ -92,6 +111,8 @@ impl Reset for WilliamsR {
     fn reset(&mut self) {
         self.buckets.reset();
         self.bars.clear();
+        self.ext.clear();
+        self.ext_built = true;
     }
 }
 
@@ -150,5 +171,67 @@ mod tests {
         }
         // Highest = 11, close = 10 → −100 × 1/4 = −25.
         assert!((out + 25.0).abs() < 1e-9, "williams = {out}");
+    }
+
+    /// Incremental extrema match the definitional rescan under mixed
+    /// appends, same-bucket revisions, and window evictions (exact).
+    #[test]
+    fn equivalence_with_naive_under_appends_replaces_and_evictions() {
+        let mut state: u64 = 0x51ab3f9d2c7e401b;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let start = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+
+        for _ in 0..100 {
+            let window_days = 2 + rng() % 30;
+            let mut w = WilliamsR::new(
+                Duration::from_secs(window_days * 86_400),
+                Duration::from_secs(86_400),
+            )
+            .unwrap();
+            let mut bars: Vec<(i64, f64, f64, f64)> = Vec::new();
+            let mut day: i64 = 0;
+            for _ in 0..400 {
+                let roll = rng() % 10;
+                if roll < 3 && !bars.is_empty() {
+                    // Same bucket: revise the live bar.
+                } else if roll < 4 {
+                    day += 1 + (rng() % 40) as i64;
+                } else {
+                    day += 1;
+                }
+                let base = 10.0 + (rng() % 10_000) as f64 / 100.0;
+                let (h, l, c) = (
+                    base + (rng() % 500) as f64 / 100.0,
+                    base - (rng() % 500) as f64 / 100.0,
+                    base,
+                );
+                let got = w.next((start + chrono::Duration::days(day), bar(h, l, c)));
+                if roll < 3 && !bars.is_empty() {
+                    *bars.last_mut().unwrap() = (day, h, l, c);
+                } else {
+                    bars.push((day, h, l, c));
+                }
+                bars.retain(|(d, _, _, _)| *d > day - window_days as i64);
+                let highest = bars
+                    .iter()
+                    .map(|(_, h, _, _)| *h)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let lowest = bars
+                    .iter()
+                    .map(|(_, _, l, _)| *l)
+                    .fold(f64::INFINITY, f64::min);
+                let expected = if highest > lowest {
+                    -100.0 * (highest - c) / (highest - lowest)
+                } else {
+                    -50.0
+                };
+                assert_eq!(got, expected, "mismatch (day={day})");
+            }
+        }
     }
 }

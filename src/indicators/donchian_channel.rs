@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::fixed_time_bucket::{BucketUpdate, FixedTimeBucket};
+use super::window_aggregate::SlidingExtrema;
 use crate::errors::{Result, TaError};
 use crate::{Close, High, Low, Next, NextBatch, Reset};
 
@@ -31,6 +32,12 @@ pub struct DonchianChannel {
     window: Duration,
     buckets: FixedTimeBucket,
     bars: VecDeque<(DateTime<Utc>, f64, f64)>,
+    /// Highest/lowest over committed bars; the live bar folds in at query.
+    /// Derived state, rebuilt from `bars` after deserialize via `ensure_built`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    ext: SlidingExtrema,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    ext_built: bool,
 }
 
 impl DonchianChannel {
@@ -42,15 +49,20 @@ impl DonchianChannel {
             window,
             buckets: FixedTimeBucket::new(bucket_width)?,
             bars: VecDeque::new(),
+            ext: SlidingExtrema::default(),
+            ext_built: true,
         })
     }
 
-    fn remove_expired(&mut self, now: DateTime<Utc>) {
+    fn cutoff_nanos(&self, now: DateTime<Utc>) -> i64 {
         let nanos = i64::try_from(self.window.as_nanos()).unwrap_or(i64::MAX);
-        let cutoff = now
-            .timestamp_nanos_opt()
+        now.timestamp_nanos_opt()
             .unwrap_or(i64::MIN)
-            .saturating_sub(nanos);
+            .saturating_sub(nanos)
+    }
+
+    fn remove_expired(&mut self, now: DateTime<Utc>) {
+        let cutoff = self.cutoff_nanos(now);
         while self
             .bars
             .front()
@@ -58,6 +70,19 @@ impl DonchianChannel {
         {
             self.bars.pop_front();
         }
+        self.ext.expire_before(cutoff);
+    }
+
+    fn ensure_built(&mut self) {
+        if self.ext_built {
+            return;
+        }
+        self.ext.clear();
+        let committed = self.bars.len().saturating_sub(1);
+        for &(ts, h, l) in self.bars.iter().take(committed) {
+            self.ext.commit(ts, h, l);
+        }
+        self.ext_built = true;
     }
 }
 
@@ -68,23 +93,18 @@ where
     type Output = DonchianOutput;
 
     fn next(&mut self, (timestamp, input): (DateTime<Utc>, T)) -> Self::Output {
+        self.ensure_built();
         let update = self.buckets.update(timestamp);
-        self.remove_expired(timestamp);
         if update == BucketUpdate::Replace {
             self.bars.pop_back();
+        } else if let Some(&(ts, h, l)) = self.bars.back() {
+            self.ext.commit(ts, h, l);
         }
-        self.bars.push_back((timestamp, input.high(), input.low()));
+        let (high, low) = (input.high(), input.low());
+        self.bars.push_back((timestamp, high, low));
+        self.remove_expired(timestamp);
 
-        let upper = self
-            .bars
-            .iter()
-            .map(|(_, h, _)| *h)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let lower = self
-            .bars
-            .iter()
-            .map(|(_, _, l)| *l)
-            .fold(f64::INFINITY, f64::min);
+        let (upper, lower) = self.ext.extremes(high, low);
         DonchianOutput {
             upper,
             lower,
@@ -99,6 +119,8 @@ impl Reset for DonchianChannel {
     fn reset(&mut self) {
         self.buckets.reset();
         self.bars.clear();
+        self.ext.clear();
+        self.ext_built = true;
     }
 }
 
@@ -154,5 +176,63 @@ mod tests {
         assert_eq!(out.upper, 12.0);
         assert_eq!(out.lower, 7.0);
         assert_eq!(out.middle, 9.5);
+    }
+
+    /// Incremental extrema match the definitional rescan under mixed
+    /// appends, same-bucket revisions, and window evictions (exact).
+    #[test]
+    fn equivalence_with_naive_under_appends_replaces_and_evictions() {
+        let mut state: u64 = 0xd07c1a2b4e5f6071;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let start = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+
+        for _ in 0..100 {
+            let window_days = 2 + rng() % 30;
+            let mut dc = DonchianChannel::new(
+                Duration::from_secs(window_days * 86_400),
+                Duration::from_secs(86_400),
+            )
+            .unwrap();
+            let mut bars: Vec<(i64, f64, f64)> = Vec::new();
+            let mut day: i64 = 0;
+            for _ in 0..400 {
+                let roll = rng() % 10;
+                if roll < 3 && !bars.is_empty() {
+                    // Same bucket: revise the live bar.
+                } else if roll < 4 {
+                    day += 1 + (rng() % 40) as i64;
+                } else {
+                    day += 1;
+                }
+                let base = 10.0 + (rng() % 10_000) as f64 / 100.0;
+                let (h, l) = (
+                    base + (rng() % 500) as f64 / 100.0,
+                    base - (rng() % 500) as f64 / 100.0,
+                );
+                let got = dc.next((start + chrono::Duration::days(day), bar(h, l)));
+                if roll < 3 && !bars.is_empty() {
+                    *bars.last_mut().unwrap() = (day, h, l);
+                } else {
+                    bars.push((day, h, l));
+                }
+                bars.retain(|(d, _, _)| *d > day - window_days as i64);
+                let upper = bars
+                    .iter()
+                    .map(|(_, h, _)| *h)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let lower = bars
+                    .iter()
+                    .map(|(_, _, l)| *l)
+                    .fold(f64::INFINITY, f64::min);
+                assert_eq!(got.upper, upper, "upper mismatch (day={day})");
+                assert_eq!(got.lower, lower, "lower mismatch (day={day})");
+                assert_eq!(got.middle, (upper + lower) / 2.0, "middle mismatch (day={day})");
+            }
+        }
     }
 }

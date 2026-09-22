@@ -24,6 +24,11 @@ pub struct ChaikinMoneyFlow {
     window: Duration,
     buckets: FixedTimeBucket,
     bars: VecDeque<(DateTime<Utc>, f64, f64)>,
+    flow_sum: f64,
+    vol_sum: f64,
+    /// Bars with exactly zero volume. All-zero ⟺ the rescan volume sum is
+    /// exactly 0, which the running `vol_sum` can miss by float dust.
+    zero_vol: usize,
 }
 
 impl ChaikinMoneyFlow {
@@ -35,21 +40,45 @@ impl ChaikinMoneyFlow {
             window,
             buckets: FixedTimeBucket::new(bucket_width)?,
             bars: VecDeque::new(),
+            flow_sum: 0.0,
+            vol_sum: 0.0,
+            zero_vol: 0,
         })
     }
 
-    fn remove_expired(&mut self, now: DateTime<Utc>) {
+    fn cutoff_nanos(&self, now: DateTime<Utc>) -> i64 {
         let nanos = i64::try_from(self.window.as_nanos()).unwrap_or(i64::MAX);
-        let cutoff = now
-            .timestamp_nanos_opt()
+        now.timestamp_nanos_opt()
             .unwrap_or(i64::MIN)
-            .saturating_sub(nanos);
+            .saturating_sub(nanos)
+    }
+
+    fn add_bar(&mut self, mfv: f64, vol: f64) {
+        self.flow_sum += mfv;
+        self.vol_sum += vol;
+        if vol == 0.0 {
+            self.zero_vol += 1;
+        }
+    }
+
+    fn remove_bar(&mut self, mfv: f64, vol: f64) {
+        self.flow_sum -= mfv;
+        self.vol_sum -= vol;
+        if vol == 0.0 {
+            self.zero_vol = self.zero_vol.saturating_sub(1);
+        }
+    }
+
+    fn remove_expired(&mut self, now: DateTime<Utc>) {
+        let cutoff = self.cutoff_nanos(now);
         while self
             .bars
             .front()
             .is_some_and(|(ts, _, _)| ts.timestamp_nanos_opt().unwrap_or(i64::MIN) <= cutoff)
         {
-            self.bars.pop_front();
+            if let Some((_, mfv, vol)) = self.bars.pop_front() {
+                self.remove_bar(mfv, vol);
+            }
         }
     }
 }
@@ -62,9 +91,10 @@ where
 
     fn next(&mut self, (timestamp, input): (DateTime<Utc>, T)) -> Self::Output {
         let update = self.buckets.update(timestamp);
-        self.remove_expired(timestamp);
         if update == BucketUpdate::Replace {
-            self.bars.pop_back();
+            if let Some((_, mfv, vol)) = self.bars.pop_back() {
+                self.remove_bar(mfv, vol);
+            }
         }
         let (high, low, close, volume) =
             (input.high(), input.low(), input.close(), input.volume());
@@ -73,14 +103,15 @@ where
         } else {
             0.0
         };
-        self.bars.push_back((timestamp, clv * volume, volume));
+        let (mfv, vol) = (clv * volume, volume);
+        self.add_bar(mfv, vol);
+        self.bars.push_back((timestamp, mfv, vol));
+        self.remove_expired(timestamp);
 
-        let flow: f64 = self.bars.iter().map(|(_, mfv, _)| mfv).sum();
-        let vol: f64 = self.bars.iter().map(|(_, _, v)| v).sum();
-        if vol == 0.0 {
+        if self.zero_vol == self.bars.len() {
             0.0
         } else {
-            flow / vol
+            self.flow_sum / self.vol_sum
         }
     }
 }
@@ -91,6 +122,9 @@ impl Reset for ChaikinMoneyFlow {
     fn reset(&mut self) {
         self.buckets.reset();
         self.bars.clear();
+        self.flow_sum = 0.0;
+        self.vol_sum = 0.0;
+        self.zero_vol = 0;
     }
 }
 
@@ -146,5 +180,68 @@ mod tests {
             out = cmf.next((t + chrono::Duration::days(i), bar(12.0, 10.0, 12.0, 100.0)));
         }
         assert!((out - 1.0).abs() < 1e-9, "cmf = {out}");
+    }
+
+    /// Incremental sums match the definitional rescan under mixed appends,
+    /// same-bucket revisions, and evictions. Summation order differs, so this
+    /// asserts approximate (1e-9) equality.
+    #[test]
+    fn equivalence_with_naive_under_appends_replaces_and_evictions() {
+        let mut state: u64 = 0x3c1e5a7b9d0f2244;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let start = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+
+        for _ in 0..100 {
+            let window_days = 2 + rng() % 30;
+            let mut cmf = ChaikinMoneyFlow::new(
+                Duration::from_secs(window_days * 86_400),
+                Duration::from_secs(86_400),
+            )
+            .unwrap();
+            let mut bars: Vec<(i64, f64, f64, f64, f64)> = Vec::new();
+            let mut day: i64 = 0;
+            for _ in 0..400 {
+                let roll = rng() % 10;
+                if roll < 3 && !bars.is_empty() {
+                    // Same bucket: revise the live bar.
+                } else if roll < 4 {
+                    day += 1 + (rng() % 40) as i64;
+                } else {
+                    day += 1;
+                }
+                let base = 10.0 + (rng() % 10_000) as f64 / 100.0;
+                let h = base + (rng() % 500) as f64 / 100.0;
+                let l = base - (rng() % 500) as f64 / 100.0;
+                let v = 100.0 + (rng() % 9_900) as f64;
+                let got = cmf.next((start + chrono::Duration::days(day), bar(h, l, base, v)));
+                if roll < 3 && !bars.is_empty() {
+                    *bars.last_mut().unwrap() = (day, h, l, base, v);
+                } else {
+                    bars.push((day, h, l, base, v));
+                }
+                bars.retain(|(d, _, _, _, _)| *d > day - window_days as i64);
+                let mut flow = 0.0;
+                let mut vol = 0.0;
+                for (_, h, l, c, v) in bars.iter() {
+                    let clv = if h > l {
+                        ((c - l) - (h - c)) / (h - l)
+                    } else {
+                        0.0
+                    };
+                    flow += clv * v;
+                    vol += v;
+                }
+                let expected = if vol == 0.0 { 0.0 } else { flow / vol };
+                assert!(
+                    (got - expected).abs() < 1e-9,
+                    "mismatch: got {got} vs {expected} (day={day})"
+                );
+            }
+        }
     }
 }
