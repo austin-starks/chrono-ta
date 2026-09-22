@@ -32,15 +32,24 @@ pub struct ParabolicSar {
     extreme: Option<f64>,
     acceleration: f64,
     sar: Option<f64>,
-    /// Lows of the last two buckets (including the live one) for Wilder's
-    /// SAR clamp. Pushed on append, revised on replace, restored with the
-    /// snapshot on revision.
+    /// Highs/lows of the last two *sealed* buckets for Wilder's SAR clamp.
+    /// The live bar seals into these on the next append; it never clamps
+    /// itself. Restored with the snapshot on revision.
+    highs: std::collections::VecDeque<f64>,
     lows: std::collections::VecDeque<f64>,
+    live: Option<(f64, f64)>,
     snapshot: Option<SarSnapshot>,
 }
 
 /// Sealed-bucket state restored when a live-bar revision re-evaluates.
-type SarSnapshot = (bool, Option<f64>, f64, Option<f64>, Vec<f64>);
+type SarSnapshot = (
+    bool,
+    Option<f64>,
+    f64,
+    Option<f64>,
+    Vec<f64>,
+    Vec<f64>,
+);
 
 impl ParabolicSar {
     pub fn new(bucket_width: Duration, step: f64, maximum: f64) -> Result<Self> {
@@ -58,7 +67,9 @@ impl ParabolicSar {
             extreme: None,
             acceleration: step,
             sar: None,
+            highs: std::collections::VecDeque::new(),
             lows: std::collections::VecDeque::new(),
+            live: None,
             snapshot: None,
         })
     }
@@ -73,32 +84,36 @@ where
     fn next(&mut self, (timestamp, input): (DateTime<Utc>, T)) -> Self::Output {
         let update = self.buckets.update(timestamp);
         if update == BucketUpdate::Append {
+            if let Some((live_high, live_low)) = self.live.take() {
+                self.highs.push_back(live_high);
+                self.lows.push_back(live_low);
+                while self.highs.len() > 2 {
+                    self.highs.pop_front();
+                }
+                while self.lows.len() > 2 {
+                    self.lows.pop_front();
+                }
+            }
             self.snapshot = Some((
                 self.long,
                 self.extreme,
                 self.acceleration,
                 self.sar,
+                self.highs.iter().copied().collect(),
                 self.lows.iter().copied().collect(),
             ));
-            self.lows.push_back(input.low());
-            while self.lows.len() > 2 {
-                self.lows.pop_front();
-            }
-        } else {
-            if let Some((long, extreme, acceleration, sar, lows)) = self.snapshot.clone() {
-                self.long = long;
-                self.extreme = extreme;
-                self.acceleration = acceleration;
-                self.sar = sar;
-                self.lows = lows.into_iter().collect();
-            }
-            if let Some(back) = self.lows.back_mut() {
-                *back = input.low();
-            } else {
-                self.lows.push_back(input.low());
-            }
+        } else if let Some((long, extreme, acceleration, sar, highs, lows)) =
+            self.snapshot.clone()
+        {
+            self.long = long;
+            self.extreme = extreme;
+            self.acceleration = acceleration;
+            self.sar = sar;
+            self.highs = highs.into_iter().collect();
+            self.lows = lows.into_iter().collect();
         }
         let (high, low) = (input.high(), input.low());
+        self.live = Some((high, low));
 
         // Seed from the first bar: long with the low as the initial SAR.
         let mut sar = match self.sar {
@@ -124,7 +139,7 @@ where
                     self.acceleration = (self.acceleration + self.step).min(self.maximum);
                 }
                 sar += self.acceleration * (extreme - sar);
-                // Wilder's clamp: never above the prior two periods' lows.
+                // Wilder's clamp: never above the prior two sealed periods' lows.
                 for prior in self.lows.iter() {
                     sar = sar.min(*prior);
                 }
@@ -142,7 +157,10 @@ where
                     self.acceleration = (self.acceleration + self.step).min(self.maximum);
                 }
                 sar += self.acceleration * (extreme - sar);
-                sar = sar.max(high);
+                // Wilder's clamp: never below the prior two sealed periods' highs.
+                for prior in self.highs.iter() {
+                    sar = sar.max(*prior);
+                }
                 self.extreme = Some(extreme);
             }
         }
@@ -160,7 +178,9 @@ impl Reset for ParabolicSar {
         self.extreme = None;
         self.acceleration = self.step;
         self.sar = None;
+        self.highs.clear();
         self.lows.clear();
+        self.live = None;
         self.snapshot = None;
     }
 }
