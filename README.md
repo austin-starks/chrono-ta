@@ -81,14 +81,14 @@ Install the published crate:
 
 ```toml
 [dependencies]
-chrono-ta = "2.2"
+chrono-ta = "3.0"
 ```
 
 Enable serialization when indicator state must survive a restart:
 
 ```toml
 [dependencies]
-chrono-ta = { version = "2.2", features = ["serde"] }
+chrono-ta = { version = "3.0", features = ["serde"] }
 ```
 
 To test an unreleased GitHub revision instead:
@@ -148,7 +148,7 @@ Application dependencies (these are not required by `chrono-ta` itself):
 ```toml
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-chrono-ta = "2.2"
+chrono-ta = "3.0"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

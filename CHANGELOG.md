@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 - 2026-10-22
+
+Daily-window outputs change for existing consumers, hence the major version.
 
 - Daily windows (one day or longer) now keep one observation per trading
   session instead of splitting a session at a 3h24m gap from its first update.
@@ -12,6 +14,12 @@
   value. It previously measured from the current bucket's first update, so
   revisions and the next bucket compared against an intrabucket price.
 - Added a cadence-invariance test covering every duration-based indicator.
+- Added twelve indicators: Stochastic, CCI, Williams %R, MFI, OBV,
+  Accumulation/Distribution, Chaikin Money Flow, Donchian, Keltner, Supertrend,
+  Ichimoku and Parabolic SAR, all with revise-instead-of-append bar semantics.
+- Amortized O(1) window maintenance for Stochastic, Williams %R, Donchian,
+  Ichimoku, MFI, CMF and CCI, with guards for running-sum dust in MFI and CCI.
+- Parabolic SAR clamps against the last two sealed highs/lows (Wilder).
 
 ## 2.2.2 - 2026-09-20
 
