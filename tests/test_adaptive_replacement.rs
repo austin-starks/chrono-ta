@@ -1,34 +1,26 @@
 use chrono::{TimeZone, Utc};
-use chrono_ta::indicators::{SimpleMovingAverage, StandardDeviation};
+use chrono_ta::indicators::{
+    BollingerBands, ExponentialMovingAverage, Lag, MaxDrawdown, MaxDrawup, Maximum,
+    MeanAbsoluteDeviation, Minimum, RateOfChange, RelativeStrengthIndex, RollingSum,
+    SimpleMovingAverage, StandardDeviation,
+};
 use chrono_ta::Next;
 use std::time::Duration;
 
 #[test]
-fn test_daily_ohlc_no_replacement() {
-    // Test that daily OHLC data (Open and Close) are NOT replaced
+fn test_daily_close_revises_the_session_open() {
+    // A daily indicator holds one observation per session: the close revises the open.
     let mut sma = SimpleMovingAverage::new(Duration::from_secs(3 * 86400)).unwrap(); // 3 days
 
-    // Day 1: Open at 9:30 AM
-    let day1_open = Utc.with_ymd_and_hms(2024, 1, 1, 9, 30, 0).unwrap();
-    let result1 = sma.next((day1_open, 100.0));
-    assert_eq!(result1, 100.0); // First value
+    let day1_open = Utc.with_ymd_and_hms(2024, 1, 2, 14, 30, 0).unwrap();
+    assert_eq!(sma.next((day1_open, 100.0)), 100.0);
+    let day1_close = Utc.with_ymd_and_hms(2024, 1, 2, 21, 0, 0).unwrap();
+    assert_eq!(sma.next((day1_close, 105.0)), 105.0);
 
-    // Day 1: Close at 4:00 PM (6.5 hours later) - should NOT replace
-    let day1_close = Utc.with_ymd_and_hms(2024, 1, 1, 16, 0, 0).unwrap();
-    let result2 = sma.next((day1_close, 105.0));
-    assert_eq!(result2, 102.5); // Average of 100 and 105
-
-    // Day 2: Open at 9:30 AM
-    let day2_open = Utc.with_ymd_and_hms(2024, 1, 2, 9, 30, 0).unwrap();
-    let result3 = sma.next((day2_open, 110.0));
-    assert_eq!(result3, 105.0); // Average of 100, 105, and 110
-
-    // Day 2: Close at 4:00 PM - should NOT replace
-    let day2_close = Utc.with_ymd_and_hms(2024, 1, 2, 16, 0, 0).unwrap();
-    let result4 = sma.next((day2_close, 108.0));
-    // With 3-day window, all 4 values should still be in window
-    // Window has: 100, 105, 110, 108
-    assert_eq!(result4, 105.75);
+    let day2_open = Utc.with_ymd_and_hms(2024, 1, 3, 14, 30, 0).unwrap();
+    assert_eq!(sma.next((day2_open, 110.0)), 107.5); // 105 and the in-progress 110
+    let day2_close = Utc.with_ymd_and_hms(2024, 1, 3, 21, 0, 0).unwrap();
+    assert_eq!(sma.next((day2_close, 108.0)), 106.5); // 105 and 108
 }
 
 #[test]
@@ -89,27 +81,124 @@ fn test_standard_deviation_with_replacement() {
 
 #[test]
 fn test_transition_from_warmup_to_live() {
-    // Simulate warming up with daily data then transitioning to intraday
+    // Warm-up feeds each session's open and close; live then ticks every minute.
     let mut sma = SimpleMovingAverage::new(Duration::from_secs(2 * 86400)).unwrap(); // 2 days
 
-    // Warmup with daily OHLC (>4 hours apart)
-    let day1_open = Utc.with_ymd_and_hms(2024, 1, 1, 9, 30, 0).unwrap();
-    sma.next((day1_open, 100.0));
+    sma.next((Utc.with_ymd_and_hms(2024, 1, 2, 14, 30, 0).unwrap(), 100.0));
+    sma.next((Utc.with_ymd_and_hms(2024, 1, 2, 21, 0, 0).unwrap(), 102.0));
+    let warmup_result = sma.next((Utc.with_ymd_and_hms(2024, 1, 3, 14, 30, 0).unwrap(), 104.0));
+    assert_eq!(warmup_result, 103.0); // 102 and the in-progress 104
 
-    let day1_close = Utc.with_ymd_and_hms(2024, 1, 1, 16, 0, 0).unwrap();
-    sma.next((day1_close, 102.0));
+    let live = sma.next((Utc.with_ymd_and_hms(2024, 1, 3, 15, 0, 0).unwrap(), 105.0));
+    assert_eq!(live, 103.5); // the minute update revises the session: 102 and 105
+}
 
-    let day2_open = Utc.with_ymd_and_hms(2024, 1, 2, 9, 30, 0).unwrap();
-    let warmup_result = sma.next((day2_open, 104.0));
-    assert_eq!(warmup_result, 102.0); // Average of 100, 102, 104
+/// The same daily indicator must give the same value at the same moment however
+/// often it is fed: live every minute or every five, a backtest feeding the open,
+/// a near-close decision and the close, or a process restarted at noon that
+/// rebuilds from each prior session's open and close.
+#[test]
+fn test_daily_indicators_are_cadence_invariant() {
+    const SESSIONS: i64 = 30;
+    const OPEN: i64 = 14 * 60 + 30; // minutes after UTC midnight
+    const CLOSE: i64 = 21 * 60;
+    const DECISION: i64 = CLOSE - 2;
+    let first = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+    let at = |session: i64, minute: i64| {
+        first + chrono::Duration::days(session) + chrono::Duration::minutes(minute)
+    };
+    // Deterministic minute prices with an overnight gap.
+    let price = |session: i64, minute: i64| {
+        let x = (session * 1_000 + minute) as f64;
+        500.0 + 20.0 * (x / 997.0).sin() + 3.0 * (x / 37.0).cos() + 0.5 * (x / 7.0).sin()
+    };
+    type Feed = Vec<(i64, i64, bool)>;
+    let cadence = |step: i64| -> Feed {
+        (0..SESSIONS)
+            .flat_map(|d| {
+                let mut ticks: Vec<_> = (OPEN..=CLOSE)
+                    .step_by(step as usize)
+                    .map(|m| (d, m, false))
+                    .collect();
+                ticks.push((d, DECISION, true));
+                ticks.sort();
+                ticks
+            })
+            .collect()
+    };
+    let backtest: Feed = (0..SESSIONS)
+        .flat_map(|d| [(d, OPEN, false), (d, DECISION, true), (d, CLOSE, false)])
+        .collect();
+    let restart: Feed = (0..SESSIONS)
+        .flat_map(|d| -> Feed {
+            if d < 20 {
+                vec![(d, OPEN, false), (d, CLOSE, false)]
+            } else {
+                let start = if d == 20 { 18 * 60 } else { OPEN };
+                let mut ticks: Feed = (start..=CLOSE).map(|m| (d, m, false)).collect();
+                ticks.push((d, DECISION, true));
+                ticks.sort();
+                ticks
+            }
+        })
+        .collect();
 
-    // Now continue with more frequent updates on day 2
-    // With DailyOHLC and 3.4-hour gap logic, this WILL replace day2_open
-    // since 30 minutes < 3.4 hours
-    let day2_mid = Utc.with_ymd_and_hms(2024, 1, 2, 10, 0, 0).unwrap();
-    let result = sma.next((day2_mid, 105.0));
-    // Should replace day2_open (104) with 105
-    assert_eq!(result, (100.0 + 102.0 + 105.0) / 3.0); // Average of 100, 102, 105
+    let fourteen_days = Duration::from_secs(14 * 86400);
+    let run = |feed: &Feed| -> Vec<(i64, [f64; 13])> {
+        let mut rsi = RelativeStrengthIndex::new(fourteen_days).unwrap();
+        let mut ema = ExponentialMovingAverage::new(fourteen_days).unwrap();
+        let mut sma = SimpleMovingAverage::new(fourteen_days).unwrap();
+        let mut sd = StandardDeviation::new(fourteen_days).unwrap();
+        let mut mad = MeanAbsoluteDeviation::new(fourteen_days).unwrap();
+        let mut roc = RateOfChange::new(fourteen_days).unwrap();
+        let mut max = Maximum::new(fourteen_days).unwrap();
+        let mut min = Minimum::new(fourteen_days).unwrap();
+        let mut drawdown = MaxDrawdown::new(fourteen_days).unwrap();
+        let mut drawup = MaxDrawup::new(fourteen_days).unwrap();
+        let mut sum = RollingSum::new(fourteen_days).unwrap();
+        let mut bands = BollingerBands::new(fourteen_days, 2.0).unwrap();
+        let mut lag = Lag::new(Duration::from_secs(3 * 86400)).unwrap();
+        let mut out = Vec::new();
+        for &(d, m, decision) in feed {
+            let input = (at(d, m), price(d, m));
+            let values = [
+                rsi.next(input),
+                ema.next(input),
+                sma.next(input),
+                sd.next(input),
+                mad.next(input),
+                roc.next(input),
+                max.next(input),
+                min.next(input),
+                drawdown.next(input),
+                drawup.next(input),
+                sum.next(input),
+                bands.next(input),
+                lag.next(input).unwrap_or(f64::NAN),
+            ];
+            if decision && d >= 20 {
+                out.push((d, values));
+            }
+        }
+        out
+    };
+    let reference = run(&cadence(1));
+    assert_eq!(reference.len(), 10);
+    for (name, feed) in [
+        ("5-minute", cadence(5)),
+        ("backtest", backtest),
+        ("restart", restart),
+    ] {
+        let values = run(&feed);
+        for ((d, expected), (_, actual)) in reference.iter().zip(&values) {
+            for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
+                assert!(
+                    (e - a).abs() <= 1e-9 * e.abs().max(1.0) || (e.is_nan() && a.is_nan()),
+                    "{name} session {d} indicator {i}: {a} != {e}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

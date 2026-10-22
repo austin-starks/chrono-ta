@@ -347,7 +347,12 @@ adaptive detector keeps those revisions from becoming several observations:
 
 - windows shorter than five minutes use one-second buckets;
 - intraday windows use one-minute buckets;
-- windows of one day or longer use the library's daily-session gap rule.
+- windows of one day or longer keep one observation per trading session
+  (sessions roll over at 06:00 UTC), so every update in a session revises that
+  session's point.
+
+A daily indicator therefore gives the same value at the same moment whether it
+is fed every minute, only at the open and close, or rebuilt after a restart.
 
 Calling `next` twice inside the same bucket replaces the current observation
 instead of advancing the indicator. Timestamps should therefore arrive in

@@ -15,7 +15,12 @@ pub struct RelativeStrengthIndex {
     duration: Duration,
     up_ema_indicator: Ema,
     down_ema_indicator: Ema,
+    /// Final value of the previous bucket; gains and losses are measured from it.
     prev_val: Option<f64>,
+    /// Latest value of the current bucket. State serialized before this field
+    /// existed loads `None` and continues from `prev_val`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    current_val: Option<f64>,
     detector: AdaptiveTimeDetector,
 }
 
@@ -26,6 +31,7 @@ impl RelativeStrengthIndex {
             up_ema_indicator: Ema::new(duration)?,
             down_ema_indicator: Ema::new(duration)?,
             prev_val: None,
+            current_val: None,
             detector: AdaptiveTimeDetector::new(duration),
         })
     }
@@ -38,7 +44,11 @@ impl Next<f64> for RelativeStrengthIndex {
         // Check if we should replace the last value (same time bucket)
         let should_replace = self.detector.should_replace(timestamp);
 
-        // Calculate gain and loss using the stable prev_val
+        // A new bucket closes the current one: its final value is the base for
+        // every revision of the new bucket.
+        if !should_replace && self.current_val.is_some() {
+            self.prev_val = self.current_val;
+        }
         let (gain, loss) = if let Some(prev_val) = self.prev_val {
             if value > prev_val {
                 (value - prev_val, 0.0)
@@ -49,11 +59,7 @@ impl Next<f64> for RelativeStrengthIndex {
             (0.0, 0.0)
         };
 
-        // Only update prev_val for the NEXT period if this is not a replacement
-        // When replacing, prev_val stays as the previous period's close
-        if !should_replace {
-            self.prev_val = Some(value);
-        }
+        self.current_val = Some(value);
 
         // Update EMAs
         let avg_up = self.up_ema_indicator.next((timestamp, gain));
@@ -101,11 +107,12 @@ impl NextBatch<f64> for RelativeStrengthIndex {
         }
 
         // Vectorizable diff loop: compute gains and losses across the
-        // batch, threading `prev_val` through.
+        // batch. Every input opens a new bucket, so the first is measured
+        // from the current bucket's final value.
         let n = inputs.len();
         let mut gain_inputs: Vec<(DateTime<Utc>, f64)> = Vec::with_capacity(n);
         let mut loss_inputs: Vec<(DateTime<Utc>, f64)> = Vec::with_capacity(n);
-        let mut prev = self.prev_val;
+        let mut prev = self.current_val.or(self.prev_val);
         for &(ts, value) in inputs {
             let (gain, loss) = match prev {
                 Some(p) => {
@@ -131,7 +138,11 @@ impl NextBatch<f64> for RelativeStrengthIndex {
         for &(ts, _) in inputs {
             self.detector.should_replace(ts);
         }
-        self.prev_val = Some(inputs[n - 1].1);
+        self.prev_val = match n {
+            1 => self.current_val.or(self.prev_val),
+            _ => Some(inputs[n - 2].1),
+        };
+        self.current_val = Some(inputs[n - 1].1);
 
         // Combine into the RSI value per index.
         let mut out = Vec::with_capacity(n);
@@ -157,6 +168,7 @@ impl NextBatch<f64> for RelativeStrengthIndex {
 impl Reset for RelativeStrengthIndex {
     fn reset(&mut self) {
         self.prev_val = None;
+        self.current_val = None;
         self.up_ema_indicator.reset();
         self.down_ema_indicator.reset();
         self.detector.reset();

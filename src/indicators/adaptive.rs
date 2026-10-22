@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum DetectedFrequency {
     /// Still learning from initial data points (kept for backward compatibility only)
     Unknown,
-    /// Daily mode: maintains 3.4 hour gap between points
+    /// Daily mode: one observation per trading session
     DailyOHLC,
     /// Intraday mode: minute-level bucketing
     Intraday(Duration),
@@ -20,12 +20,15 @@ pub enum DetectedFrequency {
 ///
 /// Uses a simple duration-based rule:
 /// - Indicators with duration < 1 day: Use minute-level bucketing (replace within same minute)
-/// - Indicators with duration >= 1 day: Use daily bucketing with 3.4 hour gap enforcement
+/// - Indicators with duration >= 1 day: One observation per trading session
 ///
-/// The 3.4 hour gap for daily indicators ensures:
-/// - Half-day sessions (~3.5 hours): Captures both open and close as separate points
-/// - Full-day sessions (~6.5 hours): Captures morning and afternoon as separate points
-/// - Minutely updates during market hours: Continuously updates the current slot
+/// A daily indicator must give the same value at the same moment however often
+/// it is fed: a live engine ticking every minute, a backtest feeding the open and
+/// the close, and a process restarted mid-session all agree. Every update inside
+/// a session revises that session's observation; the first update of the next
+/// session appends. Sessions roll over at 06:00 UTC (01:00-02:00 US Eastern), so
+/// pre-market, regular and after-hours updates of one US session share a bucket
+/// in both daylight-saving states.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone)]
 pub struct AdaptiveTimeDetector {
@@ -35,8 +38,18 @@ pub struct AdaptiveTimeDetector {
     /// `should_replace` is a single integer divide on the hot path.
     #[cfg_attr(feature = "serde", serde(default))]
     intraday_bucket_seconds: i64,
+    /// Current bucket: the minute (or second) index in `Intraday` mode, the
+    /// session index in `DailyOHLC` mode.
     last_minute_bucket: i64,
     last_timestamp: Option<DateTime<Utc>>,
+}
+
+/// Seconds after UTC midnight at which one trading session ends and the next begins.
+const SESSION_ROLLOVER_UTC_SECONDS: i64 = 6 * 3600;
+
+#[inline]
+fn session_day(timestamp: DateTime<Utc>) -> i64 {
+    (timestamp.timestamp() - SESSION_ROLLOVER_UTC_SECONDS).div_euclid(86_400)
 }
 
 impl AdaptiveTimeDetector {
@@ -113,29 +126,18 @@ impl AdaptiveTimeDetector {
                 should_replace
             }
             DetectedFrequency::DailyOHLC => {
-                // Daily bucketing with 3.4 hour gap enforcement
-                // The 3.4 hour threshold ensures:
-                // - Half-day sessions (~3.5 hours): Captures both open and close
-                // - Full-day sessions (~6.5 hours): Captures morning and afternoon
-
-                // 3.4 hours = 3 hours 24 minutes = 12,240 seconds
-                let min_gap = chrono::Duration::seconds(3 * 3600 + 24 * 60);
-
-                if let Some(last_ts) = self.last_timestamp {
-                    let time_diff = timestamp - last_ts;
-
-                    // If within 3.4 hours of the last point, replace it
-                    // This handles minutely data during market hours
-                    if time_diff > chrono::Duration::zero() && time_diff < min_gap {
-                        // Don't update last_timestamp here - we're replacing
-                        return true;
+                // State serialized before session bucketing carries only the
+                // timestamp of its current observation.
+                if self.last_minute_bucket == i64::MIN {
+                    if let Some(last_ts) = self.last_timestamp {
+                        self.last_minute_bucket = session_day(last_ts);
                     }
                 }
-
-                // Either first point or more than 3.4 hours have passed
-                // This is a new slot, so update last_timestamp
+                let session = session_day(timestamp);
+                let should_replace = session == self.last_minute_bucket;
+                self.last_minute_bucket = session;
                 self.last_timestamp = Some(timestamp);
-                false
+                should_replace
             }
             DetectedFrequency::Unknown => {
                 // Shouldn't happen but default to not replacing
@@ -172,66 +174,61 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn test_daily_indicator_with_gap_enforcement() {
+    fn test_daily_indicator_one_observation_per_session() {
         let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(2 * 86400)); // 2 days
         assert_eq!(detector.frequency(), &DetectedFrequency::DailyOHLC);
 
-        let base = Utc.ymd(2024, 1, 1).and_hms(9, 30, 0);
-
-        // First point
-        assert!(!detector.should_replace(base));
-
-        // Point 6.5 hours later (full trading day) - new slot
-        assert!(!detector
-            .should_replace(base + chrono::Duration::hours(6) + chrono::Duration::minutes(30)));
-
-        // Next day - new slot
-        assert!(!detector.should_replace(base + chrono::Duration::days(1)));
-
-        // Now test the 3.4 hour gap enforcement
-        let market_open = base + chrono::Duration::days(2);
-        assert!(!detector.should_replace(market_open)); // New day, new slot
-
-        // Minutely updates within 3.4 hours should replace
-        assert!(detector.should_replace(market_open + chrono::Duration::minutes(1)));
-        assert!(detector.should_replace(market_open + chrono::Duration::minutes(30)));
-        assert!(detector.should_replace(market_open + chrono::Duration::hours(3)));
-
-        // After 3.4 hours, should create new slot
-        assert!(!detector.should_replace(
-            market_open + chrono::Duration::hours(3) + chrono::Duration::minutes(25)
-        ));
+        // 2024-01-02 regular session: 14:30-21:00 UTC (09:30-16:00 EST).
+        let open = Utc.with_ymd_and_hms(2024, 1, 2, 14, 30, 0).unwrap();
+        assert!(!detector.should_replace(open));
+        // Every later update of the session revises its observation: midday,
+        // the close, and after-hours prints up to 01:00 UTC the next day.
+        for offset in [
+            chrono::Duration::minutes(1),
+            chrono::Duration::hours(3) + chrono::Duration::minutes(25),
+            chrono::Duration::hours(6) + chrono::Duration::minutes(30),
+            chrono::Duration::hours(10) + chrono::Duration::minutes(30),
+        ] {
+            assert!(detector.should_replace(open + offset));
+        }
+        // Next session's pre-market and open append exactly once.
+        let next_premarket = Utc.with_ymd_and_hms(2024, 1, 3, 9, 0, 0).unwrap();
+        assert!(!detector.should_replace(next_premarket));
+        assert!(detector.should_replace(Utc.with_ymd_and_hms(2024, 1, 3, 14, 30, 0).unwrap()));
     }
 
     #[test]
     fn test_half_day_trading() {
         let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(3 * 86400)); // 3 days
-        assert_eq!(detector.frequency(), &DetectedFrequency::DailyOHLC);
+                                                                                      // 2024-11-29 half day: 14:30-18:00 UTC. Open and close are one observation.
+        let open = Utc.with_ymd_and_hms(2024, 11, 29, 14, 30, 0).unwrap();
+        assert!(!detector.should_replace(open));
+        assert!(detector
+            .should_replace(open + chrono::Duration::hours(3) + chrono::Duration::minutes(30)));
+        // The following Monday is a new session.
+        assert!(!detector.should_replace(Utc.with_ymd_and_hms(2024, 12, 2, 14, 30, 0).unwrap()));
+    }
 
-        // Simulate half-day trading (market closes at 1:00 PM, ~3.5 hours)
-        let half_day_open = Utc.ymd(2024, 1, 2).and_hms(9, 30, 0);
-        assert!(!detector.should_replace(half_day_open)); // New slot for open price
-
-        // All updates during first 3.4 hours should replace the open price
-        assert!(detector.should_replace(half_day_open + chrono::Duration::minutes(30)));
-        assert!(detector.should_replace(half_day_open + chrono::Duration::hours(2)));
-        assert!(detector.should_replace(half_day_open + chrono::Duration::hours(3)));
-        assert!(detector.should_replace(
-            half_day_open + chrono::Duration::hours(3) + chrono::Duration::minutes(20)
-        )); // Still within 3.4 hours
-
-        // Close at 1:00 PM (3.5 hours) should create NEW slot since 3.5 > 3.4
-        // This captures the closing price as a separate data point
-        let half_day_close =
-            half_day_open + chrono::Duration::hours(3) + chrono::Duration::minutes(30);
-        assert!(!detector.should_replace(half_day_close)); // New slot for close price
-
-        // If more updates come in near close, they replace the close price
-        assert!(detector.should_replace(half_day_close + chrono::Duration::minutes(1)));
-
-        // Next day should be a new slot
-        let next_day = half_day_open + chrono::Duration::days(1);
-        assert!(!detector.should_replace(next_day));
+    #[test]
+    fn test_sessions_roll_over_in_both_daylight_saving_states() {
+        // 20:00 ET after-hours is 00:00 UTC (EDT) or 01:00 UTC (EST); both stay
+        // with their session, and 04:00 ET pre-market starts the next one.
+        for (close_utc, next_premarket_utc) in [
+            (
+                Utc.with_ymd_and_hms(2024, 7, 2, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 7, 2, 8, 0, 0).unwrap(),
+            ),
+            (
+                Utc.with_ymd_and_hms(2024, 1, 3, 1, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 1, 3, 9, 0, 0).unwrap(),
+            ),
+        ] {
+            let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(14 * 86400));
+            let open = close_utc - chrono::Duration::hours(10) - chrono::Duration::minutes(30);
+            assert!(!detector.should_replace(open));
+            assert!(detector.should_replace(close_utc));
+            assert!(!detector.should_replace(next_premarket_utc));
+        }
     }
 
     #[test]
@@ -264,30 +261,15 @@ mod tests {
     #[test]
     fn test_full_trading_day_with_minutely_updates() {
         let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(5 * 86400)); // 5 days
-
-        // Full trading day: 9:30 AM to 4:00 PM (6.5 hours)
-        let market_open = Utc.ymd(2024, 1, 2).and_hms(9, 30, 0);
-
-        // First data point at market open
+        let market_open = Utc.with_ymd_and_hms(2024, 1, 2, 14, 30, 0).unwrap();
         assert!(!detector.should_replace(market_open));
-
-        // Minutely updates for first 3 hours should all replace
-        for minutes in 1..=180 {
+        for minutes in 1..=390 {
             assert!(
                 detector.should_replace(market_open + chrono::Duration::minutes(minutes)),
-                "Should replace at {} minutes after open",
+                "minute {} after the open must revise the session",
                 minutes
             );
         }
-
-        // After 3.4 hours (204 minutes), should create new slot
-        assert!(!detector.should_replace(market_open + chrono::Duration::minutes(205)));
-
-        // Subsequent updates should replace this new slot
-        assert!(detector.should_replace(market_open + chrono::Duration::minutes(210)));
-        assert!(detector.should_replace(
-            market_open + chrono::Duration::hours(6) // Near market close
-        ));
     }
 
     #[test]
@@ -349,68 +331,28 @@ mod tests {
 
     #[test]
     fn test_memory_footprint_for_trading_sessions() {
-        let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(10 * 86400)); // 10 days
-
-        // Track which timestamps would be kept (not replaced)
-        let mut kept_timestamps = Vec::new();
-
-        // Half-day: Should keep exactly 2 points (open and close)
-        let half_day_open = Utc.ymd(2024, 1, 2).and_hms(9, 30, 0);
-        if !detector.should_replace(half_day_open) {
-            kept_timestamps.push(half_day_open);
-        }
-
-        // Minutely updates that get replaced
-        for minutes in 1..209 {
-            let ts = half_day_open + chrono::Duration::minutes(minutes);
-            if !detector.should_replace(ts) {
-                kept_timestamps.push(ts);
+        // Five sessions of minutely updates (a half day among them) keep five points.
+        let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(10 * 86400));
+        let mut kept = 0;
+        for (day, minutes) in [(25, 390), (26, 390), (27, 390), (29, 210), (2, 390)] {
+            let month = if day == 2 { 12 } else { 11 };
+            let open = Utc.with_ymd_and_hms(2024, month, day, 14, 30, 0).unwrap();
+            for minute in 0..=minutes {
+                if !detector.should_replace(open + chrono::Duration::minutes(minute)) {
+                    kept += 1;
+                }
             }
         }
+        assert_eq!(kept, 5, "one point per session");
+    }
 
-        // Close at 1:00 PM (210 minutes = 3.5 hours)
-        let half_day_close = half_day_open + chrono::Duration::minutes(210);
-        if !detector.should_replace(half_day_close) {
-            kept_timestamps.push(half_day_close);
-        }
-
-        // We should have exactly 2 timestamps for the half-day
-        assert_eq!(
-            kept_timestamps.len(),
-            2,
-            "Half-day should keep exactly 2 points"
-        );
-
-        // Full trading day test
-        kept_timestamps.clear();
-        detector.reset();
-
-        let full_day_open = Utc.ymd(2024, 1, 3).and_hms(9, 30, 0);
-        if !detector.should_replace(full_day_open) {
-            kept_timestamps.push(full_day_open);
-        }
-
-        // Minutely updates for 6.5 hours (390 minutes)
-        for minutes in 1..=390 {
-            let ts = full_day_open + chrono::Duration::minutes(minutes);
-            if !detector.should_replace(ts) {
-                kept_timestamps.push(ts);
-            }
-        }
-
-        // We should have exactly 2 timestamps for the full day
-        // One at open, one after 3.4 hours (204 minutes)
-        assert_eq!(
-            kept_timestamps.len(),
-            2,
-            "Full day should keep exactly 2 points"
-        );
-
-        // Verify the gap between kept points is > 3.4 hours
-        let gap = kept_timestamps[1] - kept_timestamps[0];
-        assert!(
-            gap >= chrono::Duration::minutes(204),
-            "Gap between points should be >= 3.4 hours"
-        );
+    /// A daily detector serialized before session bucketing has only
+    /// `last_timestamp`. Its next update in the same session must still revise.
+    #[test]
+    fn test_daily_state_from_before_session_bucketing() {
+        let mut detector = AdaptiveTimeDetector::new(Duration::from_secs(14 * 86400));
+        detector.last_timestamp = Some(Utc.with_ymd_and_hms(2024, 1, 2, 14, 30, 0).unwrap());
+        assert!(detector.should_replace(Utc.with_ymd_and_hms(2024, 1, 2, 20, 0, 0).unwrap()));
+        assert!(!detector.should_replace(Utc.with_ymd_and_hms(2024, 1, 3, 14, 30, 0).unwrap()));
     }
 }

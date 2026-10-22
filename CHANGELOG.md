@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Daily windows (one day or longer) now keep one observation per trading
+  session instead of splitting a session at a 3h24m gap from its first update.
+  The old rule made a daily indicator depend on how often it was fed: a live
+  feed, an open/close backtest and a restarted process disagreed at the same
+  moment. Sessions roll over at 06:00 UTC; serialized detectors continue from
+  their stored timestamp.
+- RSI measures every revision of a bucket from the previous bucket's final
+  value. It previously measured from the current bucket's first update, so
+  revisions and the next bucket compared against an intrabucket price.
+- Added a cadence-invariance test covering every duration-based indicator.
+
 ## 2.2.2 - 2026-09-20
 
 - Replaced the Alpaca walkthrough with Public's documented one-minute bars,
